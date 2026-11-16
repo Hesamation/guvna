@@ -290,7 +290,7 @@ func reorderArgs(args []string) []string {
 		a := args[i]
 		if strings.HasPrefix(a, "-") {
 			flags = append(flags, a)
-			if !strings.Contains(a, "=") && a != "-" && a != "--" {
+			if !strings.Contains(a, "=") && a != "-" && a != "--" && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
