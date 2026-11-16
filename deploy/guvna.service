@@ -1,0 +1,40 @@
+# guvna.service — systemd USER unit for the Guvna gateway
+#
+# UNTESTED AS A UNIT: the verification VM (2026-11-16) has no systemd
+# user bus ("Failed to connect to bus: No medium found"), so this file
+# was never installed or started. Every binary behavior it relies on
+# (flags, env vars, SIGTERM handling, exit codes) was verified live
+# against Hesamation/guvna@c95435a. Verify on a real host with:
+#   systemctl --user daemon-reload && systemctl --user enable --now guvna
+#   systemctl --user status guvna && curl -s http://127.0.0.1:20128/healthz
+#
+# Layout assumed (see PRODUCTION.md §4):
+#   binary:  ~/.local/bin/guvna
+#   config:  ~/.config/guvna/config.yaml   (NOT ~/.guvna/ — see override note)
+#   env:     ~/.config/guvna/guvna.env     (chmod 600, unquoted values)
+#   data:    ~/.guvna/                     (guvna.db + chains.yaml)
+#
+# Why the config lives in ~/.config: ~/.guvna/config.yaml, when present,
+# silently overrides the -config flag (verified). Keeping the config
+# outside the data dir removes that surprise.
+
+[Unit]
+Description=Guvna AI gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/guvna -config %h/.config/guvna/config.yaml -data %h/.guvna
+EnvironmentFile=%h/.config/guvna/guvna.env
+Environment=GOMEMLIMIT=256MiB
+# guvna.db inherits the process umask (observed 0640 under umask 0007);
+# 0077 makes it 0600. The data dir itself is created 0700 by the gateway.
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+# Shutdown: up to 5s HTTP drain (code) + final telemetry flush (verified).
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=default.target
