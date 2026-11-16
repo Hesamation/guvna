@@ -48,9 +48,14 @@ func main() {
 
 	log.Printf("starting, config=%s", *configPath)
 
-	cfg, err := loadConfig(*configPath)
+	cfg, cfgPath, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	if cfgPath != *configPath {
+		// ~/.guvna/config.yaml silently won over the flag path — say so, or
+		// the operator is debugging the wrong file (see OPERATIONS.md).
+		log.Printf("config: %s exists — overriding -config %s", cfgPath, *configPath)
 	}
 
 	adminKey := os.Getenv(envAdminKey)
@@ -112,7 +117,7 @@ func main() {
 // no shell or curl, so the binary itself is the container healthcheck.
 func doHealthCheck(configPath string) int {
 	port := 20128
-	if cfg, err := loadConfig(configPath); err == nil {
+	if cfg, _, err := loadConfig(configPath); err == nil {
 		port = cfg.Port
 	} else {
 		log.Printf("healthcheck: config ignored (%v), probing :%d", err, port)
@@ -132,13 +137,15 @@ func doHealthCheck(configPath string) int {
 }
 
 // loadConfig prefers ~/.guvna/config.yaml; falls back to the flag path.
-func loadConfig(flagPath string) (*config.Config, error) {
+// Returns the path actually loaded so the caller can surface overrides.
+func loadConfig(flagPath string) (*config.Config, string, error) {
 	homeCfg := filepath.Join(dbDir(), "config.yaml")
 	path := flagPath
 	if _, err := os.Stat(homeCfg); err == nil {
 		path = homeCfg
 	}
-	return config.Load(path)
+	cfg, err := config.Load(path)
+	return cfg, path, err
 }
 
 func dbDir() string {
