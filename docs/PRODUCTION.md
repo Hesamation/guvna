@@ -7,8 +7,7 @@ at `c95435a` or is explicitly marked otherwise — see the verification footer.
 
 For the 5-minute paths (Compose quickstart, TLS caddy snippet, chains
 workflow, CLI observability), see [DEPLOYMENT.md](DEPLOYMENT.md). This
-document is the production companion to it, not a replacement. For the
-dashboard (separate binary), see [DASHBOARD.md](DASHBOARD.md).
+document is the production companion to it, not a replacement.
 
 ## 1. What runs in production
 
@@ -232,8 +231,7 @@ The repo ships `deploy/docker-compose.yml` + `deploy/Dockerfile`
 `/config.yaml`, entrypoint `-config /config.yaml -data /data`, named
 volume `guvna-data` at `/data`, `network_mode: host`,
 `mem_limit: 400m`, `GOMEMLIMIT=256MiB`, healthcheck via the binary's
-`-healthcheck` flag). The dashboard is an opt-in `--profile dashboard`
-service; see DASHBOARD.md.
+`-healthcheck` flag).
 
 **Verification status: the Compose file parses as valid YAML (verified)
 but was never built or run here — no Docker in the verification VM.**

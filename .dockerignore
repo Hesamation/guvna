@@ -1,14 +1,11 @@
-# Build context exclusions. Applies to every Dockerfile built from this
-# repo root (deploy/Dockerfile, deploy/Dockerfile.dashboard).
+# Build context exclusions. Applies to the Dockerfile built from this
+# repo root (deploy/Dockerfile).
 #
 # Kept OUT: VCS metadata, secrets, local state, docs — none of it is needed
-# to compile the binaries, and .env* must never ride along in a build
+# to compile the binary, and .env* must never ride along in a build
 # context (a local .env holds real provider keys).
 #
 # Kept IN on purpose:
-# - vendor/ — the dashboard Dockerfile builds hermetically (GOPROXY=off)
-#   from a vendored tree. Excluding it would break that build.
-# - web/ — go:embed assets for the dashboard binary.
 # - config.yaml — copied into the gateway image by the final stage.
 .git
 .github
