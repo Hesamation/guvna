@@ -134,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/chains", s.auth.Middleware(http.HandlerFunc(s.handleChainCreate)))
 	mux.Handle("DELETE /v1/chains/{name}", s.auth.Middleware(http.HandlerFunc(s.handleChainDelete)))
 	mux.Handle("GET /admin/status", s.auth.AdminMiddleware(http.HandlerFunc(s.handleAdminStatus)))
+	mux.Handle("POST /admin/providers/test", s.auth.AdminMiddleware(http.HandlerFunc(s.handleProvidersTest)))
 	mux.Handle("GET /admin/logs", s.auth.AdminMiddleware(http.HandlerFunc(s.handleAdminLogs)))
 	mux.Handle("GET /metrics", s.auth.AdminMiddleware(http.HandlerFunc(s.handleMetrics)))
 	return mux
@@ -168,7 +169,7 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 			stepsDown++
 		}
 	}
-	keys := make([]keypool.KeyStatus, 0, len(s.pools))
+	keys := make([]keypool.KeyStatus, 0, len(s.pools)*4)
 	for _, name := range s.poolNames() {
 		keys = append(keys, s.pools[name].Keys()...)
 	}
