@@ -24,6 +24,11 @@ docker run -d --name guvna \
   ghcr.io/Hesamation/guvna:latest
 ```
 
+Plain `docker run -p` needs `bind: 0.0.0.0` in the mounted
+`config.yaml`: the default loopback bind is the container's own
+loopback, which published ports cannot reach. (The Compose file uses
+host networking, where the loopback default works as-is.)
+
 ## Option B — Plain binary / systemd user unit
 
 ```sh

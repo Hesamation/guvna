@@ -32,7 +32,7 @@ Or without Docker:
 ```sh
 go install github.com/Hesamation/guvna/cmd/guvna@latest
 set -a; source .env; set +a
-guvna -config config.yaml          # listens on :20128
+guvna -config config.yaml          # listens on 127.0.0.1:20128 by default
 ```
 
 Tagged releases also publish an image to `ghcr.io/Hesamation/guvna`.

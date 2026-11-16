@@ -23,11 +23,11 @@ Measured at `c95435a` (verified live, this repo's own test run): binary
 16.7 MB, idle RSS ~12 MB. The README's "~15–40 MB" sizing is consistent
 with this measurement.
 
-The gateway binds **all interfaces** (`:port`) — verified with `ss`,
-which showed the listener on `*:20199`, not `127.0.0.1`. An older
-decision note says the app binds localhost; the code does not. Treat the
-port as exposed on every interface and rely on auth + firewall/proxy
-placement, not on a localhost bind. Auth is always on (see §3).
+The gateway binds **loopback only by default** (`127.0.0.1:20128`,
+config key `bind`, default `127.0.0.1`): only processes on the same
+machine can reach it. A reverse proxy on the same box (caddy, etc.) is
+the way to expose it. Set `bind: 0.0.0.0` to listen on all interfaces —
+only behind a firewall or a proxy you trust. Auth is always on (see §3).
 
 ## 2. Install paths
 

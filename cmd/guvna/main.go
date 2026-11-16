@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -85,7 +87,7 @@ func main() {
 	ring := logring.New(512)
 	log.SetOutput(io.MultiWriter(os.Stderr, ring))
 	srv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Addr:              net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port)),
 		Handler:           server.New(cfg, rtr, authn, tm, hlth, ring, chainStore).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

@@ -49,11 +49,36 @@ func TestLoadValid(t *testing.T) {
 	if cfg.Port != 20128 {
 		t.Errorf("port = %d, want 20128", cfg.Port)
 	}
+	if cfg.Bind != DefaultBind {
+		t.Errorf("bind = %q, want default %q", cfg.Bind, DefaultBind)
+	}
 	if len(cfg.Providers) != 2 || len(cfg.Chains) != 1 {
 		t.Fatalf("got %d providers, %d chains", len(cfg.Providers), len(cfg.Chains))
 	}
 	if cfg.DefaultChain != "fast" {
 		t.Errorf("default_chain = %q", cfg.DefaultChain)
+	}
+}
+
+func TestBindValidation(t *testing.T) {
+	cfg, err := Load(writeTemp(t, sample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Bind = "0.0.0.0"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("explicit 0.0.0.0 rejected: %v", err)
+	}
+	cfg.Bind = "not-an-ip"
+	if err := cfg.Validate(); err == nil {
+		t.Errorf("invalid bind accepted")
+	}
+	cfg.Bind = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Bind != DefaultBind {
+		t.Errorf("bind = %q, want default %q after empty", cfg.Bind, DefaultBind)
 	}
 }
 

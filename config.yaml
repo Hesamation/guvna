@@ -1,6 +1,9 @@
 # Guvna config — config-as-code, in git. Keys live in env only (.env.providers),
 # referenced here by name. See docs/ARCHITECTURE.md.
 port: 20128
+# bind: loopback only by default — only this machine can reach the gateway.
+# Set 0.0.0.0 to expose it (e.g. plain `docker run -p`), behind a firewall/proxy.
+bind: 127.0.0.1
 
 providers:
   # --- Bazaarlink: OpenRouter-style free models ---

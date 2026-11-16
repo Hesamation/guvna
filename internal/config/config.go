@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -11,8 +12,15 @@ import (
 
 const DefaultPort = 20128
 
+// DefaultBind is the listen address when `bind` is unset: loopback only.
+// The gateway sits behind a reverse proxy (or is used locally), so nothing
+// off the machine needs to reach it directly. Set `bind: 0.0.0.0` to
+// expose it — only behind a firewall or a proxy you trust.
+const DefaultBind = "127.0.0.1"
+
 type Config struct {
 	Port         int        `yaml:"port"`
+	Bind         string     `yaml:"bind"`
 	Providers    []Provider `yaml:"providers"`
 	Chains       []Chain    `yaml:"chains"`
 	DefaultChain string     `yaml:"default_chain"`
@@ -131,6 +139,12 @@ func Load(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	if c.Port == 0 {
 		c.Port = DefaultPort
+	}
+	if c.Bind == "" {
+		c.Bind = DefaultBind
+	}
+	if net.ParseIP(c.Bind) == nil {
+		return fmt.Errorf("bind %q: not a valid IP address", c.Bind)
 	}
 	providers := make(map[string]bool, len(c.Providers))
 	for _, p := range c.Providers {
