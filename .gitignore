@@ -3,6 +3,8 @@
 !.env.example
 !deploy/.env.example
 *.db
+*.db-shm
+*.db-wal
 
 # Private infra runbooks — never commit
 docs/runbook-*.md
