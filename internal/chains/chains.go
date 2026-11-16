@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/Hesamation/guvna/internal/router"
 	"gopkg.in/yaml.v3"
@@ -26,8 +27,11 @@ type fileChain struct {
 }
 
 // Store persists runtime chains to <data-dir>/chains.yaml with atomic rewrites.
+// Save is serialized: two concurrent chain mutations must not interleave
+// snapshot-and-write and lose one of the chains.
 type Store struct {
 	path string
+	mu   sync.Mutex
 }
 
 func New(dataDir string) *Store {
@@ -62,6 +66,8 @@ func (s *Store) Load(r *router.Router) error {
 
 // Save writes the current runtime chains atomically (tmp file + rename).
 func (s *Store) Save(r *router.Router) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	runtime := r.RuntimeChains()
 	f := fileFormat{Version: 2, Chains: make([]fileChain, 0, len(runtime))}
 	for name, steps := range runtime {
