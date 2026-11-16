@@ -184,14 +184,15 @@ func (p *Pool) Mark(env string, class Class) Class {
 		return ""
 	}
 	d := p.durationFor(class)
+	cap_ := p.qc.Auth.Duration
 	for i := 0; i < k.failures; i++ {
-		if d >= config.DefaultQuarantine.Auth.Duration {
+		if d >= cap_ {
 			break
 		}
 		d *= 2
 	}
-	if d > config.DefaultQuarantine.Auth.Duration {
-		d = config.DefaultQuarantine.Auth.Duration
+	if d > cap_ {
+		d = cap_
 	}
 	k.failures++
 	k.lastAt = p.now()

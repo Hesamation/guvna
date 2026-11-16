@@ -204,6 +204,24 @@ func TestKeysSnapshot(t *testing.T) {
 	}
 }
 
+func TestMarkCapsAtConfiguredAuthDuration(t *testing.T) {
+	qc := config.QuarantineCfg{
+		Auth:      config.Duration{Duration: time.Hour},
+		RateLimit: config.Duration{Duration: 30 * time.Minute},
+		Transient: config.Duration{Duration: time.Minute},
+	}
+	p, _ := New("p", []string{"K"}, "round_robin", qc)
+	now := time.Now()
+	p.now = func() time.Time { return now }
+	for i := 0; i < 10; i++ {
+		now = now.Add(2 * time.Hour)
+		p.Mark("K", ClassRateLimit)
+	}
+	if got := p.keys[0].downUntil.Sub(now); got > time.Hour {
+		t.Errorf("cool-off = %v, must cap at configured auth duration %v", got, time.Hour)
+	}
+}
+
 func TestMarkEmptyClassNoop(t *testing.T) {
 	p, _ := New("p", []string{"K"}, "round_robin", config.QuarantineCfg{})
 	p.Mark("K", "")
