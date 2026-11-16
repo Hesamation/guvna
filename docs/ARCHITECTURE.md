@@ -41,7 +41,8 @@ Separate, on the same interfaces:  guvna-cli (local + remote), Prometheus + Graf
 - `POST /v1/chat/completions` — OpenAI-compatible, streaming SSE passthrough and non-streaming, 15s keep-alives during upstream silence, 32MB request-body cap.
 - `GET /v1/models` — chain names (empty until clients create chains).
 - `GET/POST/DELETE /v1/chains` — chain management, any valid key.
-- `GET /admin/status`, `GET /admin/logs`, `GET /metrics` — admin-key only. `/healthz` is the only unauthenticated endpoint.
+- `GET /admin/status`, `GET /admin/logs`, `POST /admin/providers/test`, `GET /metrics` — admin-key only. `/healthz` is the only unauthenticated endpoint.
+- `POST /admin/providers/test` probes every configured provider's keys with one minimal chat completion per key and returns per-key verdicts (`ok`/`dead`/`limited`/`upstream`/`unreachable`/`rejected`/`unset`). Pure diagnostics: probes never touch key-pool state, step health, telemetry, or metrics — a probe cannot make the pool look healthier than it is. Keys within a pool are probed sequentially (rate limits); providers in parallel.
 - Successful responses carry `X-Guvna-Step: <provider>/<model>` (header precedes the SSE stream), so clients see which step served.
 - The relay rewrites only the `model` field (plus fill-missing step params); everything else passes through untouched. Body mutations happen in a single unmarshal/marshal pass.
 - No mid-stream swaps: once an upstream stream starts, the request is committed to it. A mid-stream death propagates one error chunk; a truncated stream (EOF without `[DONE]`) surfaces as an error too — a partial response never reads as complete.
@@ -91,7 +92,7 @@ Per-(provider, model) tracker: **3 consecutive retryable failures → 60s cool-o
 
 - In-memory event buffer, async batch flush to SQLite (`<data-dir>/guvna.db`) every 30s; the hot path never touches disk; a crash loses the unflushed interval; SIGTERM flushes.
 - One row per step attempt: ts, provider, chain, model, stream, status, tokens_in/out, serving key, err text. Skipped-in-cool-off steps write nothing.
-- Schema migration is additive and automatic; there is no retention/pruning — trim with SQL when stopped.
+- Schema migration is additive and automatic. Retention is opt-in (`telemetry: retain_days` in config; unset keeps every row forever — an upgrade never silently deletes telemetry): rows older than the window are pruned at startup and every 6h while running. The DB file does not shrink (SQLite reuses freed pages); growth stops instead. Manual trimming still works the same way.
 - Answers "what happened to that request". Metrics answer "how is it behaving right now".
 
 ### 7. Metrics

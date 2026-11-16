@@ -248,3 +248,21 @@ Rules: one entry per decision, date, context, rationale. New sessions should rea
 **Rationale:** The Aug 2026 vision described a product (compression engines, web UI) that was never built or was deliberately removed; three months of decisions consistently subtracted. Compression is a future idea, explicitly unbuilt — and treated with justified skepticism (see the reality check in RESEARCH-2026-08.md: 3.7% measured bill savings; free tiers are the honest target, and even there it is unproven for this codebase). The docs tell one true story: config-as-code, upstream-is-the-catalog, client-driven chains, observability outside the process, subtract until it hurts.
 
 **Also (code, same day):** a client disconnect during the pre-response phase (before any upstream bytes) no longer quarantines keys, marks step health, or writes telemetry rows — extending the 2026-08-16 client-disconnect principle to the whole request. Relay failure paths now write exactly one telemetry row per attempt (status, tokens, and error text together).
+
+## 2026-11-16 — Telemetry retention is opt-in, default keep-forever
+
+**Decision:** `telemetry: retain_days: N` prunes telemetry rows older than N days at startup and every 6h while running. Unset (the default) keeps every row forever.
+
+**Rationale:** `guvna.db` was the only unbounded resource in the system, but a destructive default would be worse than the problem it solves: an upgrade that silently deletes ~2 months of production telemetry on first boot is a betrayal of the boring-pipe contract. Pruning is an explicit operator act; the docs no longer have to say "grows until an operator acts." The file does not shrink on prune (SQLite reuses freed pages) — growth stops, VACUUM remains manual.
+
+## 2026-11-16 — Provider key probes: one command replaces the dead-key dance
+
+**Decision:** `POST /admin/providers/test` (admin-key only) + `guvna-cli providers list|test` probe every configured provider's key with one minimal chat completion (`max_tokens: 1`) and return per-key verdicts: `ok` / `dead` (401/403) / `limited` (429) / `upstream` (5xx) / `unreachable` (network) / `rejected` (other 4xx) / `unset` (env not set).
+
+**Rationale:** The runbook's fix for a quarantined key was "check the key at the provider (dashboard / a direct curl with the key)" — manual work every time a key dies (groq keys did, Aug 2026). The probe is the operational completion of the keypool feature. Two design rules make it trustworthy: it reads key envs from config rather than pool state (a quarantined key is exactly the one you want to re-test), and it has zero side effects — no quarantine marks, no step health, no telemetry, no metrics — so a probe can never make the pool look healthier than it is. Keys probe sequentially per pool (rate limits), providers in parallel; each probe is bounded at 10s.
+
+## 2026-11-16 — Client-key validation moved to constant-time comparison
+
+**Decision:** Client API keys validate via `crypto/subtle.ConstantTimeCompare` over the whole key set (no early exit), matching the admin key's existing discipline; the map lookup is gone.
+
+**Rationale:** No realistic timing attack exists in the single-user threat model, but the cost of uniformity is one loop, and SECURITY.md's "auth cannot be disabled" story should not have two comparison disciplines. Same documented caveat as the admin key: a length mismatch returns early — only key bytes are timing-protected.

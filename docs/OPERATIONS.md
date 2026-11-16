@@ -69,6 +69,8 @@ Quote gotcha (bites in two ecosystems): Docker `--env-file` does **not** strip q
 ```yaml
 port: 20128                 # optional, default 20128
 bind: 127.0.0.1             # optional; loopback by default — set 0.0.0.0 only behind a trusted proxy/firewall
+telemetry:                  # optional; unset keeps every telemetry row forever
+  retain_days: 30           # opt-in pruning: rows older than N days are deleted at startup and every 6h
 providers:
   - name: groq              # required, unique; also the default prefix
     type: openai            # required: "openai" or "gemini" (anything else = startup error)
@@ -235,11 +237,14 @@ Do not edit `chains.yaml` while the gateway runs: the in-memory runtime chains a
 export GUVNA_URL=http://127.0.0.1:20128 GUVNA_ADMIN_KEY=...
 guvna-cli status          # chains, step health, key state, usage table (--json for raw)
 guvna-cli logs -n 100     # tail the in-memory ring (512 max)
+guvna-cli providers list  # per-provider pool summary (keys, healthy, quarantined)
+guvna-cli providers test  # probe every key with one minimal completion: per-key verdicts
+guvna-cli providers test --provider groq --model llama-3.3-70b-versatile
 curl -s -H "Authorization: Bearer $ADMIN_KEY" http://127.0.0.1:20128/admin/status | jq
 curl -s -H "Authorization: Bearer $ADMIN_KEY" http://127.0.0.1:20128/metrics
 ```
 
-Admin endpoints (`/admin/status`, `/admin/logs`, `/metrics`) are admin-key-only. For Prometheus + Grafana: `deploy/observability/` has a scrape config example, the dashboard JSON, and promtool-tested alert rules.
+Admin endpoints (`/admin/status`, `/admin/logs`, `/admin/providers/test`, `/metrics`) are admin-key-only. For Prometheus + Grafana: `deploy/observability/` has a scrape config example, the dashboard JSON, and promtool-tested alert rules.
 
 ## 9. Backup and restore
 
@@ -353,7 +358,7 @@ guvna-cli status
 
 Fix:
 
-1. Check the key at the provider (dashboard / a direct curl with the key). If the provider says the key is dead, it is dead — Guvna is reporting, not causing, the failure.
+1. Re-test the key directly: `guvna-cli providers test --provider <name>` probes each key with one minimal completion (read-only — it does not touch quarantine or health state). If the probe says `dead`, the provider rejects the key — Guvna is reporting, not causing, the failure.
 2. Replace the key **value** in the env file. Key values resolve lazily per request (code-read: `internal/keypool`), so a value change takes effect without a restart; the quarantined state still applies to the env *name* until its cool-off expires or the gateway restarts.
 3. To clear quarantine immediately: restart the gateway. Quarantine is in-memory (verified: restart reset all keys to healthy, failures 0). Restarting to clear a dead key's quarantine only re-tests it — fix the key first, or it re-quarantines on the next request.
 
@@ -476,8 +481,9 @@ sqlite3 ~/.guvna/guvna.db "SELECT id, ts, provider, model, stream, status, token
 
 ## 23. Disk / data-dir problems
 
-- `guvna.db` grows with telemetry. There is **no retention/pruning logic in the code** (code-read: no DELETE/prune statements in `internal/telemetry`) — the file grows until an operator acts. Watch it with normal disk monitoring.
-- Trimming old rows while stopped (UNTESTED — standard SQLite, not run in this verification): back up first (§9), stop the gateway, `DELETE FROM requests WHERE ts < '<cutoff>'; VACUUM;`, start.
+- `guvna.db` grows with telemetry, but retention is built in now: set `telemetry: retain_days: 30` in config.yaml and rows older than the window are pruned at startup and every 6h (verified by unit tests, not yet live). Unset (the default) keeps every row forever.
+- The DB file does not shrink when rows are pruned — SQLite reuses the freed pages, so growth stops but past size remains. To reclaim space: back up first (§9), stop the gateway, `VACUUM;`, start.
+- Manual trimming still works: stop the gateway, `DELETE FROM requests WHERE ts < '<cutoff>';` (add `VACUUM;` to reclaim space), start.
 - If the disk fills while running: the flush transaction fails and the gateway logs it; requests keep serving (telemetry is best-effort). Free space, restart to re-flush. [INFERENCE: flush-failure behavior follows from the code path (error logged, buffer retained); the disk-full condition itself was not simulated.]
 
 ## 24. Restart cheat sheet
@@ -507,4 +513,4 @@ A restart is the correct "clear all transient state" action — and the only way
 
 ## Verification footer
 
-Prepared 2026-11-16 against `Hesamation/guvna@c95435a`, Go 1.26.11, in a VM with no Docker and no systemd user bus; merged from the former DEPLOYMENT.md, PRODUCTION.md, and OPERATIONS-RUNBOOK.md (content preserved, duplication removed, stale claims corrected). Live-verified by running the binary against a scripted mock upstream: startup validation + exit codes, auth behavior, chain CRUD + persistence + restart reload, all three failure classes + cool-off + fallthrough, streaming passthrough, telemetry flush/restore/migration, config override precedence, and the `go install @main` path. Code changed after `c95435a` in ways this document reflects: loopback bind default (`cccfcb8`), client-cancel no longer poisons keys/steps/telemetry (regression-tested in `internal/server/cancel_test.go`, not live-verified), single telemetry row per relay failure. UNTESTED here: Docker build/run/healthcheck, the systemd unit as a unit, the published image, and long-stream keep-alive behavior. The full verification log (`RUNBOOK-NOTE.md`) lives outside the repo.
+Prepared 2026-11-16 against `Hesamation/guvna@c95435a`, Go 1.26.11, in a VM with no Docker and no systemd user bus; merged from the former DEPLOYMENT.md, PRODUCTION.md, and OPERATIONS-RUNBOOK.md (content preserved, duplication removed, stale claims corrected). Live-verified by running the binary against a scripted mock upstream: startup validation + exit codes, auth behavior, chain CRUD + persistence + restart reload, all three failure classes + cool-off + fallthrough, streaming passthrough, telemetry flush/restore/migration, config override precedence, and the `go install @main` path. Code changed after `c95435a` in ways this document reflects: loopback bind default (`cccfcb8`), client-cancel no longer poisons keys/steps/telemetry (regression-tested in `internal/server/cancel_test.go`, not live-verified), single telemetry row per relay failure. Added 2026-11-16 after the merge, unit-tested but not live-verified: telemetry retention (`telemetry: retain_days`, prune at startup + every 6h), `POST /admin/providers/test` key probes (no pool/health/telemetry side effects), constant-time client-key comparison. UNTESTED here: Docker build/run/healthcheck, the systemd unit as a unit, the published image, and long-stream keep-alive behavior. The full verification log (`RUNBOOK-NOTE.md`) lives outside the repo.

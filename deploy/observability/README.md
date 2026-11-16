@@ -20,7 +20,7 @@ committed).
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `guvna_chat_requests_total` | counter | `chain`, `outcome` | Chat requests. `outcome`: `success` (served by a step), `failed` (all steps failed), `rejected` (never reached an upstream). Unresolved requests use `chain="unknown"`; provider-prefixed passthrough uses `chain="direct"`. |
+| `guvna_chat_requests_total` | counter | `chain`, `outcome` | Chat requests. `outcome`: `success` (served by a step), `failed` (all steps failed), `rejected` (never reached an upstream). Unresolved requests use `chain="unknown"`; provider-prefixed passthrough uses `chain="direct"`. Client disconnects: pre-response cancels record no outcome at all; mid-stream disconnects count as `success` (the upstream served until the client left). |
 | `guvna_chat_duration_seconds` | histogram | `chain` | End-to-end chat latency incl. retries, fallbacks, relay. |
 | `guvna_step_attempts_total` | counter | `provider`, `model`, `outcome` | Upstream attempts. `outcome`: `success`, `auth_error` (401/403), `rate_limited` (429), `server_error` (5xx), `client_error` (other 4xx), `network_error` (no response). Retries count as separate attempts. |
 | `guvna_step_duration_seconds` | histogram | `provider`, `model` | Time to first upstream response per attempt. |
