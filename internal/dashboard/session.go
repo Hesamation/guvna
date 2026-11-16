@@ -51,7 +51,9 @@ func newSessionAuth(user, password string) *sessionAuth {
 	return &sessionAuth{user: user, passHash: sha256.Sum256([]byte(password)), attempts: make(map[string]*attempt)}
 }
 
-// checkPassword compares in constant time (length folded in, like internal/auth).
+// checkPassword compares the username and then the password hash in constant
+// time for equal-length inputs (subtle.ConstantTimeCompare returns early on
+// length mismatch, so lengths are not treated as secret).
 func (s *sessionAuth) checkPassword(user, password string) bool {
 	if subtle.ConstantTimeCompare([]byte(user), []byte(s.user)) != 1 {
 		// Still hash the guess so user enumeration isn't timing-cheap.

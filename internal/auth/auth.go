@@ -12,7 +12,8 @@ type Authenticator struct {
 }
 
 // New builds an Authenticator. adminKey comes from the ADMIN_KEY env; clientKeys
-// is the set of valid client API keys. All are compared with constant-time equality.
+// is the set of valid client API keys. Only the admin key uses constant-time
+// comparison; client keys are validated by map lookup.
 func New(adminKey string, clientKeys []string) *Authenticator {
 	client := make(map[string]bool, len(clientKeys))
 	for _, k := range clientKeys {
@@ -69,8 +70,9 @@ func bearer(header string) (string, bool) {
 	return strings.TrimSpace(header[len(prefix):]), true
 }
 
-// constantTimeEqual avoids leaking key lengths via early exit on length mismatch,
-// and timing information via early exit on byte mismatch.
+// constantTimeEqual compares equal-length inputs without early exit on byte
+// mismatch. A length mismatch returns early, so key length is not treated
+// as secret; only the key bytes themselves are protected from timing leaks.
 func constantTimeEqual(a, b string) bool {
 	if len(a) != len(b) {
 		return false
