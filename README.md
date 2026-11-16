@@ -93,6 +93,7 @@ Use-ready and running in production (single user) since 2026-08-16. Token compre
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Decision log with dates and rationale — read first, don't relitigate without new evidence |
 | [docs/FREE_MODELS.md](docs/FREE_MODELS.md) | Per-provider free-tier limits (dated snapshot; drifts weekly) |
 | [docs/RESEARCH-2026-08.md](docs/RESEARCH-2026-08.md) | Archived research: why scratch, gateway comparisons, compression reality check |
+| [BENCHMARKS.md](BENCHMARKS.md) | Measured receipts: RSS, RPS, tails vs new-api and litellm |
 
 ## Contributing
 

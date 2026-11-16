@@ -266,3 +266,9 @@ Rules: one entry per decision, date, context, rationale. New sessions should rea
 **Decision:** Client API keys validate via `crypto/subtle.ConstantTimeCompare` over the whole key set (no early exit), matching the admin key's existing discipline; the map lookup is gone.
 
 **Rationale:** No realistic timing attack exists in the single-user threat model, but the cost of uniformity is one loop, and SECURITY.md's "auth cannot be disabled" story should not have two comparison disciplines. Same documented caveat as the admin key: a length mismatch returns early — only key bytes are timing-protected.
+
+## 2026-11-16 — Load harness lives in-repo, outside the gateway binary
+
+**Decision:** `bench/` is a standalone binary (mock upstream + load driver, stdlib-only) kept in the repo; BENCHMARKS.md records measured numbers against new-api (v1.0.0-rc.51) and litellm (1.109.1).
+
+**Rationale:** The lean-gateway claim needed receipts, and a reusable harness pointed at any OpenAI-compatible gateway is what makes the comparison reproducible rather than anecdotal. It stays a separate binary under `bench/` — never imported by the gateway — so it does not tax the core. Key finding worth keeping: under synthetic 370k-requests/20s load, the telemetry event buffer's uncapped growth between 30s flushes shows up as RSS peaks (~185–208MB) — the same unbounded-growth family as the retention knob, flagged in BENCHMARKS.md as the honest next fix if it ever matters at real volume.
