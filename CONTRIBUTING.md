@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for looking at Guvna. It is a deliberately small, opinionated project — read [docs/VISION.md](docs/VISION.md) before proposing features; non-goals there are real.
+Thanks for looking at Guvna. It is a deliberately small, opinionated project — read the [principles](README.md#principles) and [docs/DECISIONS.md](docs/DECISIONS.md) before proposing features; past rejections there are real, and this repo subtracts more often than it adds.
 
 ## Development
 

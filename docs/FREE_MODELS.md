@@ -1,6 +1,8 @@
 # Free Models & Rate Limits
 
-Reference for integrations: which models are free on each provider, and the free-tier rate limits. All limits are free-tier (no credit card). Limits drift — verify before relying on them. Last checked: 2026-08-17.
+Reference for integrations: which models are free on each provider, and the free-tier rate limits. All limits are free-tier (no credit card).
+
+**Snapshot, last checked 2026-08-17 — stale by design's own argument.** The project rejected local model catalogs in code precisely because they go stale; this file is the same kind of data, kept only because provider *limits* (RPM/TPM classes) drift slower than model availability. Verify against the provider before relying on anything here, especially model names.
 
 Legend: RPM = requests/min, TPM = tokens/min, RPD = requests/day, TPD = tokens/day. `0/0/0` = no free tier.
 

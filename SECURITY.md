@@ -20,7 +20,7 @@ Out of scope (by design):
 
 - Multi-tenant isolation — Guvna serves one operator; all client keys are trusted to that operator
 - DoS resilience beyond basic timeouts — it is meant to run behind a reverse proxy
-- The host environment (reverse proxy TLS, firewall) — see docs/DEPLOYMENT.md hardening notes
+- The host environment (reverse proxy TLS, firewall) — see docs/OPERATIONS.md (TLS exposure) hardening notes
 
 ## Design guarantees
 

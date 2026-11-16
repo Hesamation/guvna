@@ -1,86 +1,133 @@
 # Architecture
 
-## High-level
+Guvna is one static binary: a single-user OpenAI-compatible relay with chain-based fallback, key pools, and self-healing. This document is the canonical home for its semantics — every other doc links here instead of restating them.
 
 ```
 any OpenAI-compatible client
-        │  /v1/*  (port 20128, auth: Bearer admin/API key)
+        │  /v1/*  (127.0.0.1:20128 by default, auth: Bearer admin/API key)
         ▼
 ┌──────────────────────────────────────────┐
-│  Guvna daemon (single static binary) │
-│  ┌────────────┐ ┌───────────────┐        │
-│  │  Router    │ │  Compression  │        │
-│  │  adaptors  │ │  pipeline*    │        │
-│  └────────────┘ └───────────────┘        │
-│  ┌────────────┐ ┌───────────────┐        │
-│  │  Chains    │ │  Telemetry    │        │
-│  │  (runtime) │ │  (SQLite)     │        │
-│  └────────────┘ └───────────────┘        │
+│  Guvna daemon (single static binary)     │
+│  ┌──────────────┐  ┌──────────────────┐  │
+│  │ Relay + auth │  │  Chain routing   │  │
+│  ├──────────────┤  ├──────────────────┤  │
+│  │ Key pools    │  │  Step health     │  │
+│  ├──────────────┤  ├──────────────────┤  │
+│  │ Telemetry    │  │  /admin, /metrics│  │
+│  │ (SQLite)     │  │  (ring buffer)   │  │
+│  └──────────────┘  └──────────────────┘  │
 └───────────────┬──────────────────────────┘
-                │ outbound HTTPS
+                │ outbound HTTPS (IPv4-first, 5m header timeout)
         ┌───────┴────────┐
-        │ 50+ providers  │
+        │ free-tier providers │
         └────────────────┘
 
-Separate, optional:  read-only web UI binary* (never in core)
-CLI:                guvna-cli status / logs / chains (local + remote over gateway)
-
-* planned — see ROADMAP phases 6–7; everything unmarked is shipped.
+Separate, on the same interfaces:  guvna-cli (local + remote), Prometheus + Grafana
 ```
+
+## Design rules (non-negotiable)
+
+- Config in git, never DB. SQLite holds telemetry only.
+- The upstream is the catalog: loose validation, no local model lists.
+- No default chains: clients self-provision over the API.
+- No UI in this repo. Dashboards consume `/admin/*` and `/metrics` from outside.
+- Loopback bind by default; exposure is an explicit act.
+- Auth cannot be disabled: the gateway refuses to start without `ADMIN_KEY` and `API_KEYS`.
 
 ## Components
 
-### 1. Router (built)
-- `/v1/chat/completions` (+ `/v1/models`) OpenAI-compatible, streaming SSE passthrough, 15s keep-alives
-- **Chain routing is the core primitive**: chains = ordered (provider, model) steps. First 2xx step serves; non-2xx walks to the next step; all steps failed → last upstream response propagated as-is. No silent mid-stream restarts. Chains are retried (2 retries, 250ms→1s backoff) and failure-marked (3 consecutive failures → cool-off 60s doubling to 10min, auto-recovery).
-- **No default chains**: every chain is created per use case by the client via `POST /v1/chains` (any valid API key — apps self-provision; persisted to `<data-dir>/chains.yaml`, atomic rewrite). `DELETE /v1/chains/{name}` removes runtime chains. `/v1/models` lists chains (empty until the client creates them). Unknown model → 404 with a pointer to the creation API — no silent fallback.
-- **Provider-prefixed passthrough**: any model named `<prefix>/<model>` routes directly to that provider, bypassing chains. Prefixes are per-provider in config (`prefixes:` list, defaults to the provider name). If the suffix is in the provider's known models, only the suffix is sent upstream (e.g. `groq/llama-3.3-70b-versatile` → groq, model `llama-3.3-70b-versatile`); otherwise the full name is sent (namespaced catalogs, e.g. `openai/gpt-5.6-luna` → orcarouter, model `openai/gpt-5.6-luna`).
-- **Loose validation, no catalogs**: chain creation validates provider exists and model is non-empty — NOT model existence. The upstream provider IS the catalog; a stale local catalog would reject valid new models (upstream 404s at request time and the chain falls over instead).
-- **Key pools + rotation**: providers take `key_envs: [K1, K2, ...]` (a single `key_env` still works = 1-key pool). Per-provider rotation strategy (`rotation:`): `round_robin` (default) / `least_used` / `sequential`, picking only healthy keys. Class-based quarantine (`quarantine:` per-provider overrides; defaults 24h auth / 60s rate_limit / 60s transient): 401/403 → `auth`, 429 → `rate_limit`, 5xx/network → `transient`; durations double per consecutive failure (capped). Success resets a key. Failover: on a quarantinable response the same request is retried on the next healthy key within the step retry budget (401/403 consume retries too — dead keys burn budget fast). All keys down → step treated as down → chain walks on. Streaming rotation is per-request; a mid-stream key death propagates an error chunk (no mid-stream swap). Key state (state/reason/failures/cool-off remaining/requests/tokens per key) is exposed in `/admin/status` `keys`; telemetry rows carry the serving `key`. Quarantine is in-memory (resets on restart, like step health).
-- **Model rewrite**: relay rewrites the request's `model` field per step (clients send logical names; upstream needs the real model). Everything else passes through untouched.
-- Provider adaptors: small per-provider interface (`Chat(ctx, body) (*http.Response, error)`), pattern from new-api's `relay_adaptor.go`. Two types built: `openai` (base + `/v1/chat/completions`) and `gemini` (base + `/v1beta/openai` + chat path — Gemini's official OpenAI-compat endpoint, passthrough no translation). Outbound requests carry `User-Agent: guvna/0.1` (bazaarlink throttles UA-less requests).
-- Auth: Bearer admin key (`ADMIN_KEY`) or client key (`API_KEYS`), always on; `/healthz` unauthenticated
-- Telemetry: in-memory event buffer, async batch flush to SQLite every 30s (pure-Go driver, no CGO); hot path never touches disk; crash loses <30s
-- Single process, one port. No dashboard in the process.
+### 1. Relay surface (`/v1`)
 
-### 2. Compression pipeline (planned — ROADMAP Phase 6, not built)
-Decision precedence when built (adapted from OmniRoute): per-request header (`x-guvna-compression`) → named profile → adaptive → config default → off. Cache-aware compression is always on (never touch already-cached prefixes).
+- `POST /v1/chat/completions` — OpenAI-compatible, streaming SSE passthrough and non-streaming, 15s keep-alives during upstream silence, 32MB request-body cap.
+- `GET /v1/models` — chain names (empty until clients create chains).
+- `GET/POST/DELETE /v1/chains` — chain management, any valid key.
+- `GET /admin/status`, `GET /admin/logs`, `GET /metrics` — admin-key only. `/healthz` is the only unauthenticated endpoint.
+- Successful responses carry `X-Guvna-Step: <provider>/<model>` (header precedes the SSE stream), so clients see which step served.
+- The relay rewrites only the `model` field (plus fill-missing step params); everything else passes through untouched. Body mutations happen in a single unmarshal/marshal pass.
+- No mid-stream swaps: once an upstream stream starts, the request is committed to it. A mid-stream death propagates one error chunk; a truncated stream (EOF without `[DONE]`) surfaces as an error too — a partial response never reads as complete.
 
-v1 engines:
-1. **Caveman-style** — JSON rule packs + language packs + injected system prompt. Rule pack format and packs are MIT-licensed from JuliusBrussee/caveman and OmniRoute's `open-sse` compression config.
-2. **RTK-style tool-output filters** — reimplement filters for ~10 dominant commands (git, grep, ls, build logs) in Go. Reference: rtk-ai/rtk (Rust CLI, no library API — reimplement, don't bind).
-3. **Session dedup** — content-addressed pruning of repeated/redundant conversation turns.
+### 2. Chain routing
 
-v2 (not in v1): LLMLingua-2 (ONNX MobileBERT, heavy — separate process or sidecar), headroom-style live-zone (only compress the uncached tail).
+- A chain is an ordered list of (provider, model, params) steps. Resolution order: **exact chain name → model named inside a chain's steps → provider-prefix passthrough → 404** (with a pointer to the creation API — no silent fallback).
+- First 2xx step serves; non-2xx walks to the next step; all steps failed → last upstream response propagated as-is (network-dead everywhere → 503 `no providers available`).
+- Loose validation by design: chain creation checks the provider exists and the model is non-empty — **not** model existence. A bad model 404s at request time and the chain falls through.
+- Runtime chains persist to `<data-dir>/chains.yaml` (atomic tmp+rename, mutex-serialized writes); config-defined chains load at startup and cannot be deleted via the API. Runtime chains are authoritative in memory — the file is read only at startup.
 
-### 3. Catalog sync (cancelled)
+**Provider-prefix passthrough**: any model named `<prefix>/<model>` routes directly to that provider, bypassing chains. Prefixes are per-provider (`prefixes:`, defaults to the provider name; orcarouter also claims `openai`, `anthropic`, `google`). If the suffix is in the provider's known `models:` list, only the suffix is sent upstream; otherwise the full name is sent (namespaced catalogs).
 
-~~Subscribe-sync script pulling OmniRoute's MIT catalog data.~~ **Cancelled 2026-08-16** — catalogs go stale and a stale catalog rejects valid new models. The upstream provider IS the catalog: chain creation validates loosely (provider exists, model non-empty) and unknown models fail at request time, where the chain falls over. Full rationale in DECISIONS.md.
+### 3. Key pools (canonical semantics)
 
-### 4. Config & data
-- **Config-as-code**: YAML in git (`config.yaml`): providers, keys via env, profiles, compression settings, ports, routing weights
-- **SQLite**: usage/telemetry only (request counts, tokens, errors). Never for config.
-- Data dir: `~/.guvna/` (config override, db, logs)
+Providers take `key_envs: [K1, K2, ...]` (single `key_env` = 1-key pool; both set = startup error). Key **values** resolve lazily per request — env changes take effect without a restart; pool **membership** is config-time.
 
-### 5. Security
-- Auth always on: one admin key (env `ADMIN_KEY`), client keys (env `API_KEYS`); the gateway refuses to start without them
-- Remote CLI authenticates with the admin key over the gateway's HTTPS endpoint — no new port, no separate token scheme (revocable scoped tokens: future work, ROADMAP Phase 4)
-- No multi-user, no registration, no open dashboard
+- **Rotation** (`rotation:` per provider): `round_robin` (default) / `least_used` / `sequential`, picking only healthy keys. If every key is quarantined, `Pick` falls back to the key whose cool-off expires soonest — selection never hard-blocks; persistent failure surfaces via step health instead.
+- **Class-based quarantine** (`quarantine:` per-provider overrides; defaults):
 
-### 6. Web UI (planned — ROADMAP Phase 7, not built)
-- Read-only status: provider health, usage, token savings
-- Separate binary; can be omitted from deployment entirely
+  | Class | Trigger | Default base |
+  |---|---|---|
+  | `auth` | 401/403 | 24h |
+  | `rate_limit` | 429 | 60s |
+  | `transient` | 5xx, network errors | 60s |
 
-## Sizing
+  Durations double per consecutive failure, capped at the auth duration; success resets immediately. In-memory: restart clears it (like step health).
+- **Failover**: on a quarantinable failure the same request retries on the next healthy key within the step retry budget (2 retries, 250ms → 1s backoff). 401/403 consume budget too — dead keys burn it fast. All keys down → step down → chain walks on.
+- **Streaming** rotation is per-request only; a mid-stream key death propagates an error chunk — never a mid-stream swap.
+- **Observability**: per-key state in `/admin/status` (`keys`: state, reason, failures, cool-off remaining, requests, tokens) and the serving `key` column in telemetry rows; `guvna_quarantine_events_total` + `guvna_keypool_keys` in metrics.
 
-- Core gateway: ~3-6k lines of Go (scoped reimplementation of OmniRoute's routing subset)
-- RSS: ~15-40MB idle
-- Distroless image ~10-20MB
-- Rationale in RESEARCH.md (why scratch, not port or fork)
+### 4. Step health (canonical semantics)
 
-## Non-negotiable defaults
+Per-(provider, model) tracker: **3 consecutive retryable failures → 60s cool-off, doubling per further failure, capped at 10 min**; auto-recovers without admin action; steps in cool-off are skipped entirely.
 
-- `REQUIRE_API_KEY` equivalent always on when exposed
-- Config in git, not DB
-- UI never in core process
-- Port 20128
+- Counts toward cool-off: 429, 5xx, network errors, 401/403 (so "all keys dead → step down" is real).
+- Never counted: other 4xx — client/request errors; the step did its job.
+- **Client disconnects are never upstream failures** — not mid-stream, and not in the pre-response phase: no quarantine, no health mark, no telemetry row, no metric. The request is abandoned silently.
+
+### 5. Providers / adaptors
+
+- Two adaptor types: `openai` (base + `/v1/chat/completions`) and `gemini` (Gemini's official OpenAI-compat endpoint `/v1beta/openai` — passthrough, no translation). Anything OpenAI-compatible is ~20 lines.
+- Outbound requests carry `User-Agent: guvna/0.1` (bazaarlink throttles UA-less requests).
+- The transport dials IPv4-first when A records exist (hosts serving dead AAAA records otherwise break TLS), with a 5-minute response-header timeout; there is **no overall client timeout** — streams may run long, so hung upstreams must be handled by a proxy-level timeout in front of Guvna if that matters to you.
+
+### 6. Telemetry
+
+- In-memory event buffer, async batch flush to SQLite (`<data-dir>/guvna.db`) every 30s; the hot path never touches disk; a crash loses the unflushed interval; SIGTERM flushes.
+- One row per step attempt: ts, provider, chain, model, stream, status, tokens_in/out, serving key, err text. Skipped-in-cool-off steps write nothing.
+- Schema migration is additive and automatic; there is no retention/pruning — trim with SQL when stopped.
+- Answers "what happened to that request". Metrics answer "how is it behaving right now".
+
+### 7. Metrics
+
+- `GET /metrics` (admin-key) renders the Prometheus text format from a stdlib-only registry (`internal/metrics`).
+- Counters/histograms increment on the request path; gauges sample live subsystem state at scrape time.
+- **Label discipline**: label values come only from config names or fixed vocabularies. Nothing client-controlled ever becomes a label — a hostile client cannot blow up series cardinality.
+- Names and outcome vocabularies are listed in `deploy/observability/README.md`; the Grafana dashboard and promtool-tested alert rules live there too. Counters reset on restart.
+
+### 8. Config & data
+
+- `config.yaml` (git): providers, key env names, rotation, quarantine overrides, prefixes, config chains, `port`, `bind`. Validation failures are fatal at startup (exit 1) with the field named.
+- `~/.guvna/config.yaml`, when present, **overrides** `-config` — the gateway logs the effective path and the override explicitly.
+- Data dir (`-data`, default `~/.guvna/`, mode 0700): `guvna.db` (telemetry), `chains.yaml` (runtime chains). The only persistent state.
+
+## Restart semantics (canonical)
+
+| Survives restart | Resets on restart |
+|---|---|
+| `chains.yaml` runtime chains | Key quarantine state |
+| Telemetry rows | Step cool-off state |
+| Config, env-derived keys | Metrics counters |
+
+A restart is the correct "clear all transient state" action, and the only way to apply config changes or new env-var *names*. It is the wrong action for a 429 storm or a down upstream — it discards built-up backoff and re-hammers the provider.
+
+## Sizing (measured)
+
+- Binary 16.7MB, distroless image ~19MB, idle RSS ~12MB
+- ~6.4k lines of Go, two dependencies, `CGO_ENABLED=0`
+- Rationale in [RESEARCH-2026-08.md](RESEARCH-2026-08.md) (why scratch, not port or fork)
+
+## Future directions (ideas, explicitly unbuilt)
+
+- **Compression engines** — caveman-style rule packs, rtk-style tool-output filters, session dedup. The original motivation; held back by the reality check (RESEARCH-2026-08.md): measured real-bill savings for this tool class are ~3.7%, and free-tier token stretching is plausible but unproven for this codebase.
+- **Scoped CLI tokens** (revocable, replacing the admin key for remote CLI use).
+- **Per-user keys** — an auth bolt-on that never touches the router core; only honest if users bring their own keys.
+- **Native Gemini translation** behind the Adaptor interface, if a non-OpenAI-compatible need appears.
+
+Nothing here is scheduled. Subtraction beats addition in this repo; a future direction only becomes real if daily use demands it.

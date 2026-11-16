@@ -183,3 +183,68 @@ Rules: one entry per decision, date, context, rationale. New sessions should rea
 **Context:** Proposed during downstream-app integration work: per-step request params on chains with step-wins semantics. Rejected step-wins: the chain author IS the requester in this gateway (any valid key self-provisions chains), so step-wins means the client silently overrides its own explicit values (`max_tokens: 2048` → 8192 with no signal) and widens the chain-poisoning blast radius on shared chain names. Fill-missing solves the motivating case identically (client sends plain body, step fills `reasoning_effort: high` + `max_tokens`) while keeping per-request tuning intact.
 
 **Also:** responses now carry `x-guvna-step: <provider>/<model>` so clients can see which step served and whether params applied (works for SSE — header precedes the stream). chains.yaml gains a `version` field; no backward-compat constraint — nothing is migrated yet, chains are regenerable runtime state. Config-defined chains get params too (config.yaml parity). CLI stays JSON-only for params chains (repeatable `--param` flags can't express arrays/objects or bind unambiguously to a step).
+
+## 2026-09-04 — Read-only web UI: separate binary (Phase 7) (SUPERSEDED)
+
+**Decision:** The web UI shipped as an optional separate binary (`guvna-dashboard`, HTMX, read-only, own Dockerfile and compose profile) — never embedded in the gateway process.
+
+**Superseded 2026-11-16:** the dashboard is removed from the repo entirely — see the gateway-only entry below.
+
+## 2026-10-31 — Single-pass JSON rewrite on the hot path
+
+**Decision:** `rewritePayload` unmarshals the request body once, applies the model override and the step-params fill-missing merge on the same map, and marshals once. Earlier code ran independent decode/encode passes per mutation.
+
+**Context:** Arrived via an external-agent PR ("Bolt"); the learning stands regardless of source: chained marshal/unmarshal passes on a proxy hot path are pure GC/CPU overhead.
+
+**Rationale:** The relay is a passthrough; body mutation is at most two fields. One decode/encode pass does both with no behavior change.
+
+## 2026-11-01 — Module path and tags
+
+**Decision:** Module path is `github.com/Hesamation/guvna` (repo moved off the personal account). Tags v0.1.0–v0.1.2 exist; v0.1.0 predates the path fix, which briefly made `go install ...@latest` resolve to a broken tag — v0.1.2 (2026-11-16) restores it.
+
+## 2026-11-16 — Hardening batch (daily-use findings)
+
+**Decision:** A batch of reliability fixes landed from running the gateway daily:
+
+- **32MB request-body cap** — `io.ReadAll` held whole bodies in memory; one giant body could OOM the gateway. Chat payloads (even with base64 images) sit far below the cap.
+- **401/403 mark step health** — "all keys quarantined → step down" must be real, so after the failure threshold the step is skipped instead of burning the retry budget on every request. Other 4xx stay unmarked (client errors).
+- **Truncated streams surface as failures** — an upstream EOF without the terminal `[DONE]` emits an error chunk and marks the step; a partial response must never read as a complete one (also reflected in metrics: `outcome=failed`, not `success`).
+- **Keep-alives + bounded time-to-first-byte** — a dedicated goroutine writes SSE comment lines after 15s of upstream silence (the relay loop blocks in `ReadBytes` and cannot timer-check); upstream header timeout is 5m while `Client.Timeout` stays 0 for long streams. An upstream that accepts and never answers no longer holds the goroutine forever.
+- **Quarantine doubling capped at the auth duration** for every class (previously doubling could run past it).
+- **Passthrough walks providers in config order**, and removing a chain repairs the shared-model index so other chains keep resolving models it served.
+- **`chains.Store.Save` is mutex-serialized** — two concurrent chain mutations must not interleave snapshot-and-write and lose a chain.
+- **CLI errors cleanly on trailing flag args** instead of panicking.
+
+## 2026-11-16 — Prometheus /metrics in core; dashboards and alerts stay external
+
+**Decision:** `GET /metrics` (admin-key) emits the exposition from a stdlib-only registry (`internal/metrics`, no new dependencies). The Grafana dashboard JSON and alert rules live in `deploy/observability/` as external definitions; the alert rules are unit-tested with promtool.
+
+**Rationale:** Observability without dependencies and without a UI in the process. Label discipline: label values come only from config names or fixed vocabularies — nothing client-controlled ever becomes a label, so a hostile client cannot blow up series cardinality. Gauges sample live subsystem state at scrape time so they cannot drift. Process-down detection deliberately stays with Prometheus' own `up{job="guvna"}`.
+
+## 2026-11-16 — Releases gated on tests; images built in CI
+
+**Decision:** The release workflow runs the same gofmt/vet/test gate before publishing; multi-arch (amd64/arm64) images build in CI on `v*` tags; the image healthchecks via the binary's own `-healthcheck` flag. CI also builds (never pushes) the image on every PR so Dockerfile/compose regressions surface at PR time, not tag time.
+
+## 2026-11-16 — Baked-in dashboard removed: gateway-only
+
+**Decision:** The dashboard (binary, templates, static assets, Dockerfile, compose profile, CI job, docs) is deleted. Guvna stays gateway-only.
+
+**Rationale:** Three months of daily use settled the shape: the leanest possible core is the product. A graphical UI belongs in a separate, isolated component consuming the gateway's public interfaces (`/admin/status`, `/metrics`) — not in this repo. Observability already has two sufficient surfaces: `guvna-cli` and Grafana over `/metrics`. Supersedes the Phase 7 build above.
+
+## 2026-11-16 — Loopback bind by default
+
+**Decision:** The gateway binds `127.0.0.1` by default; the `bind:` config key makes exposure an explicit act (`0.0.0.0`, only behind a trusted proxy or firewall).
+
+**Rationale:** A single-user gateway's correct default is unreachable from the network. The reverse-proxy pattern (caddy on the same box) needs only loopback. Auth is always on, but not-listening beats not-authorized.
+
+## 2026-11-16 — Dead `default_chain` config field removed
+
+**Decision:** The last leftover of the removed default-chains concept is gone from config parsing. Config-defined chains are explicit `chains:` entries or nothing.
+
+## 2026-11-16 — Docs realignment: Guvna is a lean gateway
+
+**Decision:** The docs were rebuilt around what the project revealed itself to be: a lean, single-user, self-healing AI gateway — not a compression-first quota stretcher. VISION.md and ROADMAP.md are absorbed into the README; DEPLOYMENT, PRODUCTION and the operations runbook merge into OPERATIONS.md; RESEARCH.md is archived as a dated snapshot (`RESEARCH-2026-08.md`). This backfill was reconstructed from git history.
+
+**Rationale:** The Aug 2026 vision described a product (compression engines, web UI) that was never built or was deliberately removed; three months of decisions consistently subtracted. Compression is a future idea, explicitly unbuilt — and treated with justified skepticism (see the reality check in RESEARCH-2026-08.md: 3.7% measured bill savings; free tiers are the honest target, and even there it is unproven for this codebase). The docs tell one true story: config-as-code, upstream-is-the-catalog, client-driven chains, observability outside the process, subtract until it hurts.
+
+**Also (code, same day):** a client disconnect during the pre-response phase (before any upstream bytes) no longer quarantines keys, marks step health, or writes telemetry rows — extending the 2026-08-16 client-disconnect principle to the whole request. Relay failure paths now write exactly one telemetry row per attempt (status, tokens, and error text together).

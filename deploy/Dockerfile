@@ -17,7 +17,7 @@ EXPOSE 20128
 USER nonroot
 # Liveness probe: the binary itself GETs /healthz (no shell/curl in the
 # image). Compose also declares this healthcheck; the image-level one
-# covers plain `docker run` users (see docs/DEPLOYMENT.md).
+# covers plain `docker run` users (see docs/OPERATIONS.md).
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD ["/guvna", "-healthcheck", "-config", "/config.yaml"]
 ENTRYPOINT ["/guvna", "-config", "/config.yaml", "-data", "/data"]

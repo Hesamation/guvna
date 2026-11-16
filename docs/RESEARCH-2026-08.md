@@ -1,4 +1,6 @@
-# Research
+# Research (archived snapshot, Aug 2026)
+
+**Archived 2026-11-16.** This is a dated snapshot of the competitive research that shaped the project's origin (why scratch, why Go, why not fork) and the compression reality check that later demoted compression from "the whole point" to a skeptical future idea. Not maintained; competitor facts (versions, benchmarks, migrations) are as-of Aug 2026. What came of it is recorded in [DECISIONS.md](DECISIONS.md).
 
 Everything below was verified against primary sources in Aug 2026. Confidence is stated per claim.
 
