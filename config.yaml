@@ -80,6 +80,12 @@ providers:
       - deepseek/deepseek-v4-flash-free
       - qwen/qwen3.8-27b-free
 
+# Telemetry retention (optional): rows older than retain_days are pruned at
+# startup and every 6h. Unset keeps every row forever. The DB file does not
+# shrink on prune — growth stops; VACUUM manually if you need the space back.
+# telemetry:
+#   retain_days: 30
+
 # No default chains. Every chain is created per use case by the client
 # (POST /v1/chains, persisted to <data-dir>/chains.yaml). Clients may also
 # call provider-prefixed model names directly, e.g. "groq/llama-3.3-70b-versatile".

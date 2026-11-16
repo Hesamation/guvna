@@ -35,10 +35,15 @@ type Telemetry struct {
 	wg     sync.WaitGroup
 }
 
+// pruneEvery is how often a running gateway re-prunes when retention is on.
+const pruneEvery = 6 * time.Hour
+
 // Open creates the database (if needed), applies the schema, and starts the
 // flusher goroutine. interval <= 0 disables background flushing; Close still
-// flushes once.
-func Open(path string, interval time.Duration) (*Telemetry, error) {
+// flushes once. retain > 0 prunes rows older than that duration — at startup
+// and every pruneEvery afterwards; retain <= 0 keeps every row forever (the
+// default: an upgrade must never silently delete telemetry).
+func Open(path string, interval, retain time.Duration) (*Telemetry, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -64,11 +69,32 @@ func Open(path string, interval time.Duration) (*Telemetry, error) {
 		return nil, err
 	}
 	t := &Telemetry{db: db, stop: make(chan struct{})}
+	if retain > 0 {
+		if n, err := t.Prune(retain); err != nil {
+			log.Printf("telemetry prune: %v", err)
+		} else if n > 0 {
+			log.Printf("telemetry: pruned %d rows older than %s", n, retain)
+		}
+	}
 	if interval > 0 {
 		t.wg.Add(1)
-		go t.flusher(interval)
+		go t.flusher(interval, retain)
 	}
 	return t, nil
+}
+
+// Prune deletes rows older than olderThan and reports how many were removed.
+// Rows are compared by their RFC3339 UTC ts string, which is lexicographically
+// ordered. The database file does not shrink (SQLite reuses the freed pages),
+// so growth stops but past size remains unless the operator VACUUMs while
+// stopped.
+func (t *Telemetry) Prune(olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-olderThan).Format(time.RFC3339)
+	res, err := t.db.Exec(`DELETE FROM requests WHERE ts < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // migrate adds columns introduced after the initial schema to existing
@@ -108,15 +134,24 @@ func (t *Telemetry) Record(e Event) {
 	t.mu.Unlock()
 }
 
-func (t *Telemetry) flusher(interval time.Duration) {
+func (t *Telemetry) flusher(interval, retain time.Duration) {
 	defer t.wg.Done()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	lastPrune := time.Now()
 	for {
 		select {
 		case <-ticker.C:
 			if err := t.Flush(); err != nil {
 				log.Printf("telemetry flush: %v", err)
+			}
+			if retain > 0 && time.Since(lastPrune) >= pruneEvery {
+				if n, err := t.Prune(retain); err != nil {
+					log.Printf("telemetry prune: %v", err)
+				} else if n > 0 {
+					log.Printf("telemetry: pruned %d rows older than %s", n, retain)
+				}
+				lastPrune = time.Now()
 			}
 		case <-t.stop:
 			return

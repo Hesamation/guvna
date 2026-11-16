@@ -76,11 +76,15 @@ func main() {
 	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
 		log.Fatalf("data dir: %v", err)
 	}
-	tm, err := telemetry.Open(dbPath, flushEvery)
+	retain := time.Duration(cfg.Telemetry.RetainDays) * 24 * time.Hour
+	tm, err := telemetry.Open(dbPath, flushEvery, retain)
 	if err != nil {
 		log.Fatalf("telemetry: %v", err)
 	}
 	defer tm.Close()
+	if retain > 0 {
+		log.Printf("telemetry: retaining %d days", cfg.Telemetry.RetainDays)
+	}
 
 	rtr := router.New(cfg)
 	chainStore := chains.New(*dataDir)

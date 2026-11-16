@@ -33,7 +33,7 @@ func testServer(t *testing.T, providers []config.Provider, ch []config.Chain, en
 	}
 	rtr := router.New(cfg)
 	a := auth.New("admin-secret", []string{"client-1"})
-	tm, err := telemetry.Open(t.TempDir()+"/t.db", 0)
+	tm, err := telemetry.Open(t.TempDir()+"/t.db", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

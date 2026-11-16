@@ -8,7 +8,7 @@ import (
 
 func TestRecordAndFlush(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.db")
-	tm, err := Open(path, 0)
+	tm, err := Open(path, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestRecordAndFlush(t *testing.T) {
 
 func TestEmptyFlushIsNoop(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.db")
-	tm, err := Open(path, 0)
+	tm, err := Open(path, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestParseUsage(t *testing.T) {
 
 func TestCloseFlushesRemaining(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "t.db")
-	tm, err := Open(path, 0)
+	tm, err := Open(path, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestCloseFlushesRemaining(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reopen read-only to count rows.
-	tm2, err := Open(path, 0)
+	tm2, err := Open(path, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,4 +92,103 @@ func TestCloseFlushesRemaining(t *testing.T) {
 		t.Errorf("rows = %d, want 1", n)
 	}
 	tm2.Close()
+}
+
+func TestPruneDeletesOldRowsOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	tm, err := Open(path, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	tm.Record(Event{Provider: "groq", Model: "old", Status: 200, Ts: now.Add(-72 * time.Hour)})
+	tm.Record(Event{Provider: "groq", Model: "fresh", Status: 200, Ts: now})
+	if err := tm.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := tm.Prune(24 * time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("pruned = %d, want 1", n)
+	}
+	var models []string
+	rows, err := tm.db.Query(`SELECT model FROM requests ORDER BY model`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			t.Fatal(err)
+		}
+		models = append(models, m)
+	}
+	rows.Close()
+	if len(models) != 1 || models[0] != "fresh" {
+		t.Errorf("remaining = %v, want [fresh]", models)
+	}
+	if err := tm.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenWithRetentionPrunesAtStartup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	tm, err := Open(path, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm.Record(Event{Provider: "groq", Model: "old", Status: 200, Ts: time.Now().Add(-72 * time.Hour)})
+	tm.Record(Event{Provider: "groq", Model: "fresh", Status: 200, Ts: time.Now()})
+	if err := tm.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen with a 24h retention: the stale row is pruned before serving.
+	tm2, err := Open(path, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tm2.Close()
+	var n int
+	if err := tm2.db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("rows after startup prune = %d, want 1", n)
+	}
+}
+
+func TestOpenWithZeroRetentionKeepsOldRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	tm, err := Open(path, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm.Record(Event{Provider: "groq", Model: "old", Status: 200, Ts: time.Now().Add(-720 * time.Hour)})
+	if err := tm.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tm2, err := Open(path, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tm2.Close()
+	var n int
+	if err := tm2.db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("default retention must keep rows, got %d", n)
+	}
 }

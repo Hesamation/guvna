@@ -19,10 +19,18 @@ const DefaultPort = 20128
 const DefaultBind = "127.0.0.1"
 
 type Config struct {
-	Port      int        `yaml:"port"`
-	Bind      string     `yaml:"bind"`
-	Providers []Provider `yaml:"providers"`
-	Chains    []Chain    `yaml:"chains"`
+	Port      int          `yaml:"port"`
+	Bind      string       `yaml:"bind"`
+	Telemetry TelemetryCfg `yaml:"telemetry"`
+	Providers []Provider   `yaml:"providers"`
+	Chains    []Chain      `yaml:"chains"`
+}
+
+// TelemetryCfg holds telemetry store settings. RetainDays <= 0 (the default)
+// keeps every row forever — pruning is opt-in so an upgrade never silently
+// deletes telemetry.
+type TelemetryCfg struct {
+	RetainDays int `yaml:"retain_days"`
 }
 
 type Provider struct {
@@ -144,6 +152,9 @@ func (c *Config) Validate() error {
 	}
 	if net.ParseIP(c.Bind) == nil {
 		return fmt.Errorf("bind %q: not a valid IP address", c.Bind)
+	}
+	if c.Telemetry.RetainDays < 0 {
+		return fmt.Errorf("telemetry.retain_days %d: must be >= 0", c.Telemetry.RetainDays)
 	}
 	providers := make(map[string]bool, len(c.Providers))
 	for _, p := range c.Providers {
