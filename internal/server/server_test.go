@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -858,5 +859,53 @@ func TestChainsCreateEchoesParams(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("chain tuned not listed")
+	}
+}
+
+func TestChatRejectsOversizedBody(t *testing.T) {
+	providers := []config.Provider{{Name: "a", Type: "openai", BaseURL: "http://127.0.0.1:9", KeyEnv: "KEY_A"}}
+	chains := []config.Chain{{Name: "main", Steps: []config.Step{{Provider: "a", Model: "m-a"}}}}
+	_, ts := testServer(t, providers, chains, map[string]string{"KEY_A": "k"})
+	big := bytes.NewReader(make([]byte, maxRequestBody+1))
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chat/completions", big)
+	req.Header.Set("Authorization", "Bearer client-1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
+func TestChainCreateRejectsOversizedBody(t *testing.T) {
+	providers := []config.Provider{{Name: "a", Type: "openai", BaseURL: "http://127.0.0.1:9", KeyEnv: "K"}}
+	_, ts := testServer(t, providers, nil, map[string]string{"K": "k"})
+	big := bytes.NewReader(make([]byte, maxRequestBody+1))
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/chains", big)
+	req.Header.Set("Authorization", "Bearer client-1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestChatAuthFailureMarksStepDown(t *testing.T) {
+	up := completionUpstream(t, http.StatusUnauthorized, `{"error":"bad key"}`, false)
+	defer up.Close()
+	providers := []config.Provider{{Name: "a", Type: "openai", BaseURL: up.URL, KeyEnv: "KEY_A"}}
+	chains := []config.Chain{{Name: "main", Steps: []config.Step{{Provider: "a", Model: "m-a"}}}}
+	s, ts := testServer(t, providers, chains, map[string]string{"KEY_A": "k"})
+	for i := 0; i < health.FailureThreshold; i++ {
+		resp := doChat(t, ts, "main", false)
+		resp.Body.Close()
+	}
+	if !s.hlth.IsDown("a", "m-a") {
+		t.Error("repeated 401s must mark the step down (all keys dead)")
 	}
 }

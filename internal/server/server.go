@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Hesamation/guvna/internal/adaptors"
@@ -34,6 +35,11 @@ const KeepAliveInterval = 15 * time.Second
 // retries is how many times a step is retried (beyond the first attempt) on
 // transient failures (429/5xx/network) before the chain moves to the next step.
 const retries = 2
+
+// maxRequestBody caps inbound request bodies. Chat payloads — even with
+// base64 images — stay far below this; without a cap, one giant body is
+// held whole in memory by io.ReadAll and can OOM the gateway.
+const maxRequestBody = 32 << 20
 
 type Server struct {
 	cfg       *config.Config
@@ -195,7 +201,7 @@ type chainCreateRequest struct {
 // (admin or client) may create chains — apps self-provision their routes.
 func (s *Server) handleChainCreate(w http.ResponseWriter, r *http.Request) {
 	var req chainCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
 		http.Error(w, `{"error":{"message":"invalid json"}}`, http.StatusBadRequest)
 		return
 	}
@@ -253,8 +259,13 @@ type chatRequest struct {
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, `{"error":{"message":"request body too large"}}`, http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, `{"error":{"message":"read body"}}`, http.StatusBadRequest)
 		return
 	}
@@ -303,7 +314,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		lastBody, _ = io.ReadAll(resp.Body)
 		lastCT = resp.Header.Get("Content-Type")
 		resp.Body.Close()
-		if retryable(resp.StatusCode, nil) {
+		if retryable(resp.StatusCode, nil) || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			// 401/403 means the step's keys are dead (tryStep already
+			// quarantined them by class). Counting them toward step
+			// health makes "all keys down → step down" real: after the
+			// failure threshold the step is skipped instead of burning
+			// the retry budget on every request. Other 4xx stay
+			// unmarked — they are client/request errors.
 			s.hlth.Mark(step.Provider, step.Model, resp.StatusCode, nil)
 		}
 		log.Printf("chat: step %s/%s failed: status %d", step.Provider, step.Model, resp.StatusCode)
@@ -337,8 +354,10 @@ func (s *Server) tryStep(r *http.Request, step router.Step, body []byte) (*http.
 	}
 	pool := s.pools[step.Provider]
 	if pool == nil {
-		pool, _ = keypool.New(p.Name, p.AllKeyEnvs(), p.Rotation, p.Quarantine)
-		s.pools[step.Provider] = pool
+		// Pools are built for every configured provider in New; a missing
+		// pool means config and server disagree, which must surface as an
+		// error, not a lazily created pool racing concurrent requests.
+		return nil, "", fmt.Errorf("provider %q has no key pool", step.Provider)
 	}
 	payload := rewritePayload(body, step.Model, step.Params)
 	var lastErr error
@@ -465,6 +484,7 @@ func (s *Server) relaySuccess(w http.ResponseWriter, r *http.Request, step route
 				// Client disconnected — not an upstream failure.
 				return
 			}
+			s.hlth.Mark(step.Provider, step.Model, 0, err)
 			s.poolRecord(keyEnv, step, chain, req, 502, 0, 0, keypool.ClassTransient)
 			s.record(step, chain, req, 502, err, keyEnv)
 			http.Error(w, `{"error":{"message":"upstream read failed"}}`, http.StatusBadGateway)
@@ -495,32 +515,82 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router
 	flusher.Flush()
 
 	br := bufio.NewReader(resp.Body)
-	lastWrite := time.Now()
 	var in, out int64
+	var sawData, sawDone bool
+
+	// Keep-alive writer: the relay loop below blocks in ReadBytes during
+	// upstream silence, so a timer check in the loop can only run after
+	// data arrives — exactly when a keep-alive is not needed. A dedicated
+	// goroutine writes an SSE comment after KeepAliveInterval without a
+	// relayed line; the loop reports each relayed line on activity so the
+	// timer tracks real write activity. All writes to w are serialized
+	// under mu: http.ResponseWriter is not safe for concurrent use.
+	var mu sync.Mutex
+	activity := make(chan struct{}, 1)
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		timer := time.NewTimer(KeepAliveInterval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-r.Context().Done():
+				return
+			case <-activity:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(KeepAliveInterval)
+			case <-timer.C:
+				mu.Lock()
+				_, err := io.WriteString(w, ": keep-alive\n\n")
+				if err == nil {
+					flusher.Flush()
+				}
+				mu.Unlock()
+				if err != nil {
+					return // client gone; the relay loop will notice too
+				}
+				timer.Reset(KeepAliveInterval)
+			}
+		}
+	}()
+	defer func() { close(done); <-stopped }()
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		default:
 		}
-		if time.Since(lastWrite) > KeepAliveInterval {
-			if _, err := io.WriteString(w, ": keep-alive\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
-			lastWrite = time.Now()
-			continue
-		}
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
-			if _, werr := w.Write(line); werr != nil {
+			mu.Lock()
+			_, werr := w.Write(line)
+			if werr == nil {
+				flusher.Flush()
+			}
+			mu.Unlock()
+			if werr != nil {
 				return
 			}
-			flusher.Flush()
-			lastWrite = time.Now()
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
 			// Streaming usage arrives in the final data: chunk; capture it
 			// best-effort for telemetry.
 			if payload := dataPayload(line); payload != nil {
+				sawData = true
+				if string(payload) == "[DONE]" {
+					sawDone = true
+				}
 				if i, o := telemetry.ParseUsage(payload); i != 0 || o != 0 {
 					in, out = i, o
 				}
@@ -531,6 +601,21 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router
 				return // client disconnected mid-stream
 			}
 			if errors.Is(err, io.EOF) {
+				if sawData && !sawDone {
+					// Truncated stream: upstream closed cleanly after
+					// partial data without the terminal [DONE]. Without
+					// this the client mistakes a partial response for a
+					// complete one and the step is recorded as a success.
+					// Surface it like any other mid-stream failure.
+					log.Printf("chat: stream truncated from %q (no [DONE])", step.Provider)
+					mu.Lock()
+					io.WriteString(w, `data: {"error":{"message":"upstream stream truncated"}}`+"\n\n")
+					flusher.Flush()
+					mu.Unlock()
+					s.hlth.Mark(step.Provider, step.Model, 0, errors.New("stream truncated (no [DONE])"))
+					s.poolRecord(keyEnv, step, chain, req, 502, in, out, keypool.ClassTransient)
+					return
+				}
 				s.hlth.MarkSuccess(step.Provider, step.Model)
 				if p := s.pools[step.Provider]; p != nil {
 					p.MarkSuccess(keyEnv)
@@ -541,8 +626,10 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router
 			// Mid-stream failure: propagate as an error chunk, then close.
 			// Mark the provider so later requests skip it during cool-off.
 			log.Printf("chat: stream error from %q: %v", step.Provider, err)
+			mu.Lock()
 			io.WriteString(w, `data: {"error":{"message":"upstream stream error"}}`+"\n\n")
 			flusher.Flush()
+			mu.Unlock()
 			s.hlth.Mark(step.Provider, step.Model, 0, err)
 			s.poolRecord(keyEnv, step, chain, req, 502, in, out, keypool.ClassTransient)
 			return
