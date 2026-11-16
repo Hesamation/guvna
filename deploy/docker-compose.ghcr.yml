@@ -1,0 +1,28 @@
+# Guvna from the published image — no local build.
+# Usage:
+#   docker compose -f deploy/docker-compose.ghcr.yml up -d
+# Env file: deploy/.env (same file deploy/docker-compose.yml uses).
+# Images publish on v* tags via .github/workflows/release.yml.
+# Values (memory, GOMEMLIMIT, healthcheck, volume) mirror
+# deploy/docker-compose.yml; that file stays the source of truth.
+services:
+  guvna:
+    image: ghcr.io/Hesamation/guvna:latest
+    container_name: guvna
+    restart: unless-stopped
+    mem_limit: 400m
+    network_mode: host
+    environment:
+      - GOMEMLIMIT=256MiB
+    env_file: .env
+    volumes:
+      - guvna-data:/data
+    healthcheck:
+      test: ["CMD", "/guvna", "-healthcheck", "-config", "/config.yaml"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  guvna-data:

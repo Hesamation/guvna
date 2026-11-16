@@ -19,4 +19,8 @@ FROM scratch
 COPY --from=build /out/guvna-dashboard /guvna-dashboard
 EXPOSE 20129
 USER 65532:65532
+# Liveness probe: the binary itself GETs the dashboard's /healthz.
+# Matches the compose healthcheck; covers plain `docker run` users.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD ["/guvna-dashboard", "-healthcheck", "-addr", "127.0.0.1:20129"]
 ENTRYPOINT ["/guvna-dashboard"]

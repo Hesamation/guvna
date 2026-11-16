@@ -13,7 +13,29 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Tags do not trigger ci.yml (it watches push to main + PRs), so a tag
+  # could previously publish an image of untested code. The image job is
+  # gated on this test job: test -> build -> publish.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l . )" || { gofmt -l .; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
   image:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
