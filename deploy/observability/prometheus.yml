@@ -1,0 +1,20 @@
+# Example Prometheus config for scraping guvna. Copy and adjust the target
+# and the key file path; do NOT commit a real key into this file.
+#
+# /metrics is admin-key only (same as /admin/*). Prometheus sends the key
+# as a bearer token; bearer_token_file keeps it out of the config file.
+# The file must contain exactly the ADMIN_KEY value (no trailing newline
+# issues: Prometheus trims surrounding whitespace).
+
+global:
+  scrape_interval: 15s
+
+rule_files:
+  - guvna-alerts.yml
+
+scrape_configs:
+  - job_name: guvna
+    metrics_path: /metrics
+    bearer_token_file: /etc/prometheus/guvna-admin-key
+    static_configs:
+      - targets: ["127.0.0.1:20128"]

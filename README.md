@@ -16,7 +16,7 @@ Guvna takes neither horn: **config-as-code, no database, one static binary** (~1
 - **Provider-prefixed passthrough** — call any catalog model directly as `<provider>/<model>` when you don't need a chain.
 - **Self-healing** — unhealthy providers cool off (60s → 10min, auto-recovery); chains fail over across steps; no silent mid-stream restarts.
 - **Remote CLI** — `guvna-cli status|logs|chains` against the gateway's HTTPS endpoint, from anywhere.
-- **Observability** — async SQLite telemetry (requests, tokens, serving key), `/admin/status` + `/admin/logs`.
+- **Observability** — async SQLite telemetry (requests, tokens, serving key), `/admin/status` + `/admin/logs`, and `/metrics` (Prometheus exposition, admin-key; see `deploy/observability/`).
 - **Free-tier native** — ships with configs for Bazaarlink, Groq, Mistral, Gemini, OrcaRouter free tiers.
 
 ## Quickstart

@@ -24,6 +24,7 @@ import (
 	"github.com/Hesamation/guvna/internal/health"
 	"github.com/Hesamation/guvna/internal/keypool"
 	"github.com/Hesamation/guvna/internal/logring"
+	"github.com/Hesamation/guvna/internal/metrics"
 	"github.com/Hesamation/guvna/internal/router"
 	"github.com/Hesamation/guvna/internal/telemetry"
 )
@@ -50,6 +51,7 @@ type Server struct {
 	logs      *logring.Ring
 	store     *chains.Store
 	pools     map[string]*keypool.Pool
+	metrics   *metrics.Registry
 	started   time.Time
 	env       func(string) string
 	retryWait func(attempt int) time.Duration
@@ -62,7 +64,57 @@ func New(cfg *config.Config, rtr *router.Router, a *auth.Authenticator, tm *tele
 			pools[p.Name] = pool
 		}
 	}
-	return &Server{cfg: cfg, rtr: rtr, auth: a, tm: tm, hlth: hlth, logs: logs, store: store, pools: pools, started: time.Now(), env: os.Getenv, retryWait: defaultRetryWait}
+	s := &Server{cfg: cfg, rtr: rtr, auth: a, tm: tm, hlth: hlth, logs: logs, store: store, pools: pools, metrics: metrics.NewRegistry(), started: time.Now(), env: os.Getenv, retryWait: defaultRetryWait}
+	s.metrics.RegisterGaugeFunc(metrics.KeypoolKeys, "Keys per provider by health state, sampled at scrape time.", s.sampleKeypoolKeys)
+	s.metrics.RegisterGaugeFunc(metrics.StepDown, "1 when a chain step is in cool-off, 0 otherwise, sampled at scrape time.", s.sampleStepDown)
+	s.metrics.RegisterGaugeFunc(metrics.StepFailures, "Consecutive failures per chain step, sampled at scrape time.", s.sampleStepFailures)
+	s.metrics.RegisterGaugeFunc(metrics.Uptime, "Seconds since the gateway started.", func() []metrics.Sample {
+		return []metrics.Sample{metrics.NewSample(time.Since(s.started).Seconds(), nil)}
+	})
+	return s
+}
+
+// sampleKeypoolKeys counts healthy vs quarantined keys per provider from
+// live pool state. Providers without a pool emit no series.
+func (s *Server) sampleKeypoolKeys() []metrics.Sample {
+	var out []metrics.Sample
+	for _, name := range s.poolNames() {
+		healthy, quarantined := 0, 0
+		for _, ks := range s.pools[name].Keys() {
+			if ks.State == "quarantined" {
+				quarantined++
+			} else {
+				healthy++
+			}
+		}
+		out = append(out,
+			metrics.NewSample(float64(healthy), metrics.Labels{"provider": name, "state": "healthy"}),
+			metrics.NewSample(float64(quarantined), metrics.Labels{"provider": name, "state": "quarantined"}),
+		)
+	}
+	return out
+}
+
+// sampleStepDown reports 1 for steps in cool-off, 0 for observed steps that
+// are up. Steps never attempted emit no series.
+func (s *Server) sampleStepDown() []metrics.Sample {
+	var out []metrics.Sample
+	for _, st := range s.hlth.Snapshot() {
+		v := 0.0
+		if st.Down {
+			v = 1
+		}
+		out = append(out, metrics.NewSample(v, metrics.Labels{"provider": st.Provider, "model": st.Model}))
+	}
+	return out
+}
+
+func (s *Server) sampleStepFailures() []metrics.Sample {
+	var out []metrics.Sample
+	for _, st := range s.hlth.Snapshot() {
+		out = append(out, metrics.NewSample(float64(st.Failures), metrics.Labels{"provider": st.Provider, "model": st.Model}))
+	}
+	return out
 }
 
 // defaultRetryWait backs off 250ms then 1s for the two retry attempts.
@@ -83,7 +135,17 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /v1/chains/{name}", s.auth.Middleware(http.HandlerFunc(s.handleChainDelete)))
 	mux.Handle("GET /admin/status", s.auth.AdminMiddleware(http.HandlerFunc(s.handleAdminStatus)))
 	mux.Handle("GET /admin/logs", s.auth.AdminMiddleware(http.HandlerFunc(s.handleAdminLogs)))
+	mux.Handle("GET /metrics", s.auth.AdminMiddleware(http.HandlerFunc(s.handleMetrics)))
 	return mux
+}
+
+// handleMetrics renders Prometheus exposition. Admin-key only, like the
+// rest of the admin surface; Prometheus scrapes it with a bearer token.
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", `text/plain; version=0.0.4; charset=utf-8`)
+	if err := s.metrics.Write(w); err != nil {
+		log.Printf("metrics: write failed: %v", err)
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -259,8 +321,10 @@ type chatRequest struct {
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
+		s.observeChat(unknownChain, metrics.OutcomeRejected, start)
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			http.Error(w, `{"error":{"message":"request body too large"}}`, http.StatusRequestEntityTooLarge)
@@ -271,11 +335,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	var req chatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
+		s.observeChat(unknownChain, metrics.OutcomeRejected, start)
 		http.Error(w, `{"error":{"message":"invalid json"}}`, http.StatusBadRequest)
 		return
 	}
 	chain, steps, err := s.rtr.Resolve(req.Model)
 	if err != nil {
+		s.observeChat(unknownChain, metrics.OutcomeRejected, start)
 		if errors.Is(err, router.ErrNotFound) {
 			http.Error(w, fmt.Sprintf(`{"error":{"message":"unknown chain or model %q — create a chain via POST /v1/chains or use a provider-prefixed model"}}`, req.Model), http.StatusNotFound)
 			return
@@ -285,11 +351,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("chat: chain=%s model=%q steps=%d stream=%v", chain, req.Model, len(steps), req.Stream)
 
+	chainLabel := chain
+	if chainLabel == "" {
+		chainLabel = directChain // provider-prefixed passthrough has no chain name
+	}
 	var lastErr error
 	var lastStatus int
 	var lastBody []byte
 	var lastCT string
-	for _, step := range steps {
+	fellBack := false
+	for i, step := range steps {
+		if i > 0 {
+			fellBack = true
+		}
 		if s.hlth.IsDown(step.Provider, step.Model) {
 			log.Printf("chat: skipping %s/%s (cool-off)", step.Provider, step.Model)
 			continue
@@ -308,6 +382,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				p.MarkSuccess(keyEnv)
 			}
 			s.relaySuccess(w, r, step, chain, req, resp, keyEnv)
+			s.observeChat(chainLabel, metrics.OutcomeSuccess, start)
+			s.observeFallback(chainLabel, fellBack)
 			return
 		}
 		lastStatus = resp.StatusCode
@@ -328,6 +404,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	// All steps failed: propagate the last upstream response as-is.
 	log.Printf("chat: all steps failed for chain %q: %v", chain, lastErr)
+	s.observeChat(chainLabel, metrics.OutcomeFailed, start)
+	s.observeFallback(chainLabel, fellBack)
 	if lastStatus == 0 {
 		http.Error(w, `{"error":{"message":"no providers available"}}`, http.StatusServiceUnavailable)
 		return
@@ -335,6 +413,68 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", lastCT)
 	w.WriteHeader(lastStatus)
 	w.Write(lastBody)
+}
+
+// Chain labels for requests that never resolved to a named chain.
+// "unknown" keeps rejected requests out of client-controlled cardinality:
+// the requested model string is never used as a label value.
+const (
+	unknownChain = "unknown"
+	directChain  = "direct"
+)
+
+// observeChat records one completed chat request: outcome counter plus
+// end-to-end handler latency (including retries, fallbacks, and relay).
+func (s *Server) observeChat(chain, outcome string, start time.Time) {
+	s.metrics.IncCounter(metrics.ChatRequests, "Chat completion requests by chain and outcome.", 1, metrics.Labels{"chain": chain, "outcome": outcome})
+	s.metrics.ObserveHistogram(metrics.ChatDuration, "End-to-end chat request latency in seconds, including retries and relay.", metrics.DefaultBuckets, time.Since(start).Seconds(), metrics.Labels{"chain": chain})
+}
+
+// observeFallback counts a request once when it attempted a step past the
+// first — the first choice was unavailable or failed.
+func (s *Server) observeFallback(chain string, fellBack bool) {
+	if !fellBack {
+		return
+	}
+	s.metrics.IncCounter(metrics.ChainFallbacks, "Chat requests that attempted a step past the first in their chain.", 1, metrics.Labels{"chain": chain})
+}
+
+// observeStep records one upstream attempt: outcome counter plus
+// time-to-first-response latency.
+func (s *Server) observeStep(step router.Step, outcome string, d time.Duration) {
+	s.metrics.IncCounter(metrics.StepAttempts, "Upstream attempts by provider, model, and outcome.", 1, metrics.Labels{"provider": step.Provider, "model": step.Model, "outcome": outcome})
+	s.metrics.ObserveHistogram(metrics.StepDuration, "Upstream attempt latency in seconds (time to first response).", metrics.DefaultBuckets, d.Seconds(), metrics.Labels{"provider": step.Provider, "model": step.Model})
+}
+
+// observeQuarantine counts a key quarantine application. Call only when
+// Pool.Mark actually applied (non-empty return).
+func (s *Server) observeQuarantine(provider string, class keypool.Class) {
+	s.metrics.IncCounter(metrics.Quarantine, "Key quarantine applications by provider and failure class.", 1, metrics.Labels{"provider": provider, "class": string(class)})
+}
+
+// observeTokens counts usage tokens reported by the upstream. Zero counts
+// create no series: usage reporting is best-effort.
+func (s *Server) observeTokens(step router.Step, in, out int64) {
+	if in > 0 {
+		s.metrics.IncCounter(metrics.Tokens, "Tokens reported by upstreams, by direction.", float64(in), metrics.Labels{"provider": step.Provider, "model": step.Model, "direction": "in"})
+	}
+	if out > 0 {
+		s.metrics.IncCounter(metrics.Tokens, "Tokens reported by upstreams, by direction.", float64(out), metrics.Labels{"provider": step.Provider, "model": step.Model, "direction": "out"})
+	}
+}
+
+// outcomeForStatus maps an upstream HTTP status to a step-attempt outcome.
+func outcomeForStatus(status int) string {
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return metrics.OutcomeAuthError
+	case status == http.StatusTooManyRequests:
+		return metrics.OutcomeRateLimited
+	case status >= 500:
+		return metrics.OutcomeServerError
+	default:
+		return metrics.OutcomeClientError
+	}
 }
 
 // tryStep attempts one chain step, retrying transient failures (429, 5xx,
@@ -379,21 +519,30 @@ func (s *Server) tryStep(r *http.Request, step router.Step, body []byte) (*http.
 			lastErr = err
 			continue
 		}
+		attemptStart := time.Now()
 		resp, err := a.Chat(r.Context(), payload)
+		attemptTook := time.Since(attemptStart)
 		if err != nil {
 			log.Printf("chat: %s/%s attempt %d: %v", step.Provider, step.Model, attempt+1, err)
-			pool.Mark(keyEnv, keypool.ClassFor(0, err))
+			s.observeStep(step, metrics.OutcomeNetworkErr, attemptTook)
+			if applied := pool.Mark(keyEnv, keypool.ClassFor(0, err)); applied != "" {
+				s.observeQuarantine(step.Provider, applied)
+			}
 			lastErr = err
 			continue
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			s.observeStep(step, metrics.OutcomeSuccess, attemptTook)
 			return resp, keyEnv, nil
 		}
 		log.Printf("chat: %s/%s attempt %d: status %d", step.Provider, step.Model, attempt+1, resp.StatusCode)
+		s.observeStep(step, outcomeForStatus(resp.StatusCode), attemptTook)
 		if !retryable(resp.StatusCode, nil) && resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
 			return resp, keyEnv, nil // other 4xx: config/request error, never retried
 		}
-		pool.Mark(keyEnv, keypool.ClassFor(resp.StatusCode, nil))
+		if applied := pool.Mark(keyEnv, keypool.ClassFor(resp.StatusCode, nil)); applied != "" {
+			s.observeQuarantine(step.Provider, applied)
+		}
 		if attempt == retries {
 			return resp, keyEnv, nil // transient failures exhausted: last response
 		}
@@ -645,11 +794,14 @@ func (s *Server) poolRecord(keyEnv string, step router.Step, chain string, req c
 		return
 	}
 	if class != "" {
-		p.Mark(keyEnv, class)
+		if applied := p.Mark(keyEnv, class); applied != "" {
+			s.observeQuarantine(step.Provider, applied)
+		}
 	} else {
 		p.MarkSuccess(keyEnv)
 	}
 	p.Record(keyEnv, in, out)
+	s.observeTokens(step, in, out)
 	s.recordTokens(step, chain, req, status, in, out, keyEnv)
 }
 

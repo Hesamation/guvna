@@ -1,0 +1,78 @@
+# Guvna alert rules — Prometheus rule file.
+#
+# Load with `rule_files: [guvna-alerts.yml]` in prometheus.yml (see the
+# example scrape config next to this file). Thresholds assume a
+# single-user gateway: traffic is bursty, so every ratio alert requires
+# sustained failure, not one bad request.
+#
+# Process-down detection is NOT here: use Prometheus' own `up{job="guvna"} == 0`
+# for that. These rules cover what guvna itself can report.
+
+groups:
+  - name: guvna
+    interval: 30s
+    rules:
+      # A provider failing most attempts for 5 minutes: its keys are dead,
+      # its quota is gone, or it is down. Check /admin/status keys + steps,
+      # then the provider's own status.
+      - alert: GuvnaUpstreamFailing
+        expr: |
+          (
+            sum by (provider) (rate(guvna_step_attempts_total{outcome!="success"}[5m]))
+            /
+            sum by (provider) (rate(guvna_step_attempts_total[5m]))
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Provider {{ $labels.provider }} is failing most attempts"
+          description: "Error ratio {{ $value | humanizePercentage }} over the last 5m for {{ $labels.provider }}. Check key health in /admin/status and whether the provider is down."
+
+      # No healthy keys left for a provider: every request falls back to
+      # the most-recovered key. One more failure and the chain fails over.
+      - alert: GuvnaAllKeysQuarantined
+        expr: sum by (provider) (guvna_keypool_keys{state="healthy"}) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "All keys quarantined for {{ $labels.provider }}"
+          description: "No healthy keys remain for {{ $labels.provider }}. Check /admin/status for quarantine reasons (auth = dead key, rate_limit = quota, transient = upstream errors)."
+
+      # Global error ratio elevated for 10 minutes: something systemic,
+      # not one provider's blip.
+      - alert: GuvnaErrorRateSpike
+        expr: |
+          sum(rate(guvna_step_attempts_total{outcome!="success"}[5m]))
+          /
+          sum(rate(guvna_step_attempts_total[5m])) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Guvna global error ratio above 25%"
+          description: "Error ratio {{ $value | humanizePercentage }} across all providers over the last 5m."
+
+      # A step stuck in cool-off for 10 minutes: cool-off caps at 10m, so
+      # this means repeated consecutive failures, not one hiccup.
+      - alert: GuvnaStepDownSustained
+        expr: guvna_step_down == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Step {{ $labels.provider }}/{{ $labels.model }} down for 10m"
+          description: "The step has been in cool-off for 10 minutes. Check whether the model was removed or the provider changed its catalog."
+
+      # Any auth-class quarantine in the last hour: a 401/403 means a key
+      # is dead or its quota is gone (24h cool-off). Keys do not recover
+      # from this on their own — it needs a human.
+      - alert: GuvnaAuthQuarantine
+        expr: increase(guvna_quarantine_events_total{class="auth"}[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Auth quarantine for {{ $labels.provider }} in the last hour"
+          description: "A key for {{ $labels.provider }} got a 401/403 and is quarantined for 24h. Rotate or replace the key."
