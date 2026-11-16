@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 )
@@ -8,27 +9,34 @@ import (
 // Authenticator validates Bearer tokens against an admin key and a set of client keys.
 type Authenticator struct {
 	adminKey string
-	client   map[string]bool
+	client   []string
 }
 
 // New builds an Authenticator. adminKey comes from the ADMIN_KEY env; clientKeys
-// is the set of valid client API keys. Only the admin key uses constant-time
-// comparison; client keys are validated by map lookup.
+// is the set of valid client API keys. Both are compared constant-time: no
+// early exit on the first match, so request timing does not reveal which key
+// (or how much of it) matched. As with the admin key, a length mismatch
+// returns early — only the key bytes are treated as secret.
 func New(adminKey string, clientKeys []string) *Authenticator {
-	client := make(map[string]bool, len(clientKeys))
+	client := make([]string, 0, len(clientKeys))
 	for _, k := range clientKeys {
 		if k != "" {
-			client[k] = true
+			client = append(client, k)
 		}
 	}
 	return &Authenticator{adminKey: adminKey, client: client}
 }
 
 func (a *Authenticator) Valid(token string) bool {
-	if a.adminKey != "" && constantTimeEqual(a.adminKey, token) {
+	if a.isAdmin(token) {
 		return true
 	}
-	return a.client[token]
+	var ok byte
+	t := []byte(token)
+	for _, k := range a.client {
+		ok |= byte(subtle.ConstantTimeCompare([]byte(k), t))
+	}
+	return ok == 1
 }
 
 // Middleware wraps a handler, requiring a valid Bearer token.
