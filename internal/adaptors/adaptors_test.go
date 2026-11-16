@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Hesamation/guvna/internal/config"
 )
@@ -75,6 +76,41 @@ func TestNewByType(t *testing.T) {
 	}
 	if _, err := New(config.Provider{Name: "x", Type: "anthropic", BaseURL: "http://x"}, "k"); err == nil {
 		t.Fatal("expected error for unknown type")
+	}
+}
+
+func TestClientHasResponseHeaderTimeout(t *testing.T) {
+	tr, ok := Client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("Client.Transport = %T", Client.Transport)
+	}
+	if tr.ResponseHeaderTimeout != ResponseHeaderTimeout {
+		t.Errorf("ResponseHeaderTimeout = %v, want %v", tr.ResponseHeaderTimeout, ResponseHeaderTimeout)
+	}
+}
+
+func TestHeaderTimeoutBoundsSilentUpstream(t *testing.T) {
+	// Upstream accepts the connection and never writes a response. The
+	// handler waits on release (not r.Context().Done(): a client-side
+	// header timeout does not reliably cancel the server-side request
+	// context, which would wedge httptest Close).
+	release := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer func() { close(release); up.Close() }()
+	client := &http.Client{Transport: preferV4Transport(100 * time.Millisecond)}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, up.URL+"/v1/chat/completions", strings.NewReader(`{}`))
+	start := time.Now()
+	_, err := client.Do(req)
+	if err == nil {
+		t.Fatal("expected timeout error from silent upstream")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("silent upstream held the request for %v, want header-timeout failure", elapsed)
+	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("error = %v, want a timeout error", err)
 	}
 }
 

@@ -46,15 +46,24 @@ func preferV4DialContext(ctx context.Context, network, addr string) (net.Conn, e
 	return defaultDialer.DialContext(ctx, "tcp4", net.JoinHostPort(ips[0].String(), port))
 }
 
+// ResponseHeaderTimeout bounds how long the gateway waits for an upstream to
+// start responding. It applies to response headers only, so long SSE streams
+// are unaffected once headers arrive. Without it, an upstream that accepts
+// the connection and never responds holds the request goroutine forever:
+// Client.Timeout is 0 by design (streaming may run long) and the default
+// transport has no header timeout.
+const ResponseHeaderTimeout = 5 * time.Minute
+
 // Client is shared across adaptors and reused for keep-alive.
 var Client = &http.Client{
 	Timeout:   0, // no overall timeout; streaming may run long
-	Transport: preferV4Transport(),
+	Transport: preferV4Transport(ResponseHeaderTimeout),
 }
 
-func preferV4Transport() *http.Transport {
+func preferV4Transport(headerTimeout time.Duration) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.DialContext = preferV4DialContext
+	t.ResponseHeaderTimeout = headerTimeout
 	return t
 }
 
