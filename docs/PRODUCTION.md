@@ -114,9 +114,6 @@ chains:                     # optional; config-defined chains (undeletable via A
       - provider: groq
         model: llama-3.3-70b-versatile
         params: {temperature: 0.2}   # optional, fill-missing, client wins
-default_chain: mychain      # ACCEPTED BUT INERT: parsed and validated, never
-                            # consulted by the router (verified: unknown models
-                            # still 404 with it set). Do not rely on it.
 ```
 
 Validation failures are fatal at startup (exit 1) with the field named in

@@ -27,12 +27,7 @@ func (e testEnv) get(k string) string { return e[k] }
 
 func testServer(t *testing.T, providers []config.Provider, ch []config.Chain, env map[string]string) (*Server, *httptest.Server) {
 	t.Helper()
-	return testServerDefault(t, providers, ch, env, "main")
-}
-
-func testServerDefault(t *testing.T, providers []config.Provider, ch []config.Chain, env map[string]string, defaultChain string) (*Server, *httptest.Server) {
-	t.Helper()
-	cfg := &config.Config{Port: 20128, Providers: providers, Chains: ch, DefaultChain: defaultChain}
+	cfg := &config.Config{Port: 20128, Providers: providers, Chains: ch}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +217,7 @@ func TestModelsListsChainNames(t *testing.T) {
 		{Name: "fast", Steps: []config.Step{{Provider: "a", Model: "m-a"}}},
 		{Name: "smart", Steps: []config.Step{{Provider: "a", Model: "m-b"}}},
 	}
-	_, ts := testServerDefault(t, providers, chains, map[string]string{"K": "k"}, "fast")
+	_, ts := testServer(t, providers, chains, map[string]string{"K": "k"})
 
 	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer client-1")
@@ -800,7 +795,7 @@ func TestStepParamsStreamAndModelNeverMerged(t *testing.T) {
 	chains := []config.Chain{{Name: "main", Steps: []config.Step{
 		{Provider: "a", Model: "m-a", Params: map[string]any{"stream": true}},
 	}}}
-	cfg := &config.Config{Port: 20128, Providers: providers, Chains: chains, DefaultChain: "main"}
+	cfg := &config.Config{Port: 20128, Providers: providers, Chains: chains}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("config with reserved param key accepted")
 	}

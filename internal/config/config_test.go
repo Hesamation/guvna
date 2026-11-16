@@ -28,7 +28,6 @@ chains:
         model: llama-3.3-70b-versatile
       - provider: gemini
         model: gemini-2.5-flash
-default_chain: fast
 `
 
 func writeTemp(t *testing.T, content string) string {
@@ -54,9 +53,6 @@ func TestLoadValid(t *testing.T) {
 	}
 	if len(cfg.Providers) != 2 || len(cfg.Chains) != 1 {
 		t.Fatalf("got %d providers, %d chains", len(cfg.Providers), len(cfg.Chains))
-	}
-	if cfg.DefaultChain != "fast" {
-		t.Errorf("default_chain = %q", cfg.DefaultChain)
 	}
 }
 
@@ -131,17 +127,8 @@ func TestValidateNoChainsOK(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Chains = nil
-	cfg.DefaultChain = ""
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("no-chains config must validate: %v", err)
-	}
-	cfg, err = Load(writeTemp(t, sample))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.DefaultChain = "missing"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected missing default chain error")
 	}
 }
 

@@ -19,11 +19,10 @@ const DefaultPort = 20128
 const DefaultBind = "127.0.0.1"
 
 type Config struct {
-	Port         int        `yaml:"port"`
-	Bind         string     `yaml:"bind"`
-	Providers    []Provider `yaml:"providers"`
-	Chains       []Chain    `yaml:"chains"`
-	DefaultChain string     `yaml:"default_chain"`
+	Port      int        `yaml:"port"`
+	Bind      string     `yaml:"bind"`
+	Providers []Provider `yaml:"providers"`
+	Chains    []Chain    `yaml:"chains"`
 }
 
 type Provider struct {
@@ -211,9 +210,6 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("chain %q: step for %q: %w", ch.Name, s.Provider, err)
 			}
 		}
-	}
-	if c.DefaultChain != "" && !chainNames[c.DefaultChain] {
-		return fmt.Errorf("default_chain %q not found", c.DefaultChain)
 	}
 	return nil
 }
