@@ -1,0 +1,371 @@
+# promtool unit tests for guvna-alerts.yml.
+#
+# Run from this directory: ../promtool test rules alerts_test.yml
+# (rule_files paths resolve relative to the working directory.)
+#
+# Every eval_time asserts the FULL alert state: each of the 5 rules gets
+# an entry, firing ones with expected labels/annotations, the rest with
+# exp_alerts: []. An unexpected cross-fire fails the test.
+#
+# Series use interval 1m. rate() over [5m] needs >= 2 samples in the
+# window, so ratio conditions first become true at t=1m; `for` delays
+# are asserted with early eval_times expecting no alerts.
+
+rule_files:
+  - guvna-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # --- Group 1: GuvnaUpstreamFailing fires; GuvnaErrorRateSpike follows ---
+  # Provider "bad" fails 100% of attempts; "good" succeeds 100%.
+  # Per-provider ratio 1.0 > 0.5 (for 5m) -> fires ~t=6m.
+  # Global ratio 0.5 > 0.25 (for 10m) -> ErrorRateSpike fires ~t=11m.
+  - interval: 1m
+    input_series:
+      - series: 'guvna_step_attempts_total{provider="bad", model="m", outcome="server_error"}'
+        values: 0+10x20
+      - series: 'guvna_step_attempts_total{provider="good", model="m", outcome="success"}'
+        values: 0+10x20
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts:
+          - exp_labels:
+              provider: bad
+              severity: critical
+            exp_annotations:
+              summary: "Provider bad is failing most attempts"
+              description: "Error ratio 100% over the last 5m for bad. Check key health in /admin/status and whether the provider is down."
+      - eval_time: 8m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts:
+          - exp_labels:
+              provider: bad
+              severity: critical
+            exp_annotations:
+              summary: "Provider bad is failing most attempts"
+              description: "Error ratio 100% over the last 5m for bad. Check key health in /admin/status and whether the provider is down."
+      - eval_time: 15m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Guvna global error ratio above 25%"
+              description: "Error ratio 50% across all providers over the last 5m."
+      - eval_time: 15m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+
+  # --- Group 2: boundary — ratio exactly 0.5 does NOT fire UpstreamFailing ---
+  # "half" fails exactly half its attempts: 0.5 > 0.5 is false, so the
+  # per-provider alert must stay silent even at 15m, while the global
+  # alert (0.5 > 0.25) fires. Proves the strict inequality.
+  - interval: 1m
+    input_series:
+      - series: 'guvna_step_attempts_total{provider="half", model="m", outcome="success"}'
+        values: 0+10x20
+      - series: 'guvna_step_attempts_total{provider="half", model="m", outcome="server_error"}'
+        values: 0+10x20
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Guvna global error ratio above 25%"
+              description: "Error ratio 50% across all providers over the last 5m."
+      - eval_time: 15m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+
+  # --- Group 3: GuvnaAllKeysQuarantined ---
+  # "kilo": healthy=0, quarantined=2 -> fires (for 2m).
+  # "mock": healthy=2 -> silent.
+  # "ghost": quarantined series only, NO healthy series -> silent (the
+  # alert requires the healthy series to exist and equal 0).
+  - interval: 1m
+    input_series:
+      - series: 'guvna_keypool_keys{provider="kilo", state="healthy"}'
+        values: 0+0x20
+      - series: 'guvna_keypool_keys{provider="kilo", state="quarantined"}'
+        values: 2+0x20
+      - series: 'guvna_keypool_keys{provider="mock", state="healthy"}'
+        values: 2+0x20
+      - series: 'guvna_keypool_keys{provider="mock", state="quarantined"}'
+        values: 0+0x20
+      - series: 'guvna_keypool_keys{provider="ghost", state="quarantined"}'
+        values: 1+0x20
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts:
+          - exp_labels:
+              provider: kilo
+              severity: critical
+            exp_annotations:
+              summary: "All keys quarantined for kilo"
+              description: "No healthy keys remain for kilo. Check /admin/status for quarantine reasons (auth = dead key, rate_limit = quota, transient = upstream errors)."
+      - eval_time: 5m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+
+  # --- Group 4a: GuvnaErrorRateSpike fires with NO per-provider fire ---
+  # Provider "a" at exactly 0.5 (boundary, silent), provider "b" clean.
+  # Global ratio 1/3 > 0.25 -> fires after 10m. Proves the global rule
+  # catches what the per-provider rule's threshold misses.
+  - interval: 1m
+    input_series:
+      - series: 'guvna_step_attempts_total{provider="a", model="m", outcome="success"}'
+        values: 0+10x20
+      - series: 'guvna_step_attempts_total{provider="a", model="m", outcome="server_error"}'
+        values: 0+10x20
+      - series: 'guvna_step_attempts_total{provider="b", model="m", outcome="success"}'
+        values: 0+10x20
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Guvna global error ratio above 25%"
+              description: "Error ratio 33.33% across all providers over the last 5m."
+      - eval_time: 15m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+
+  # --- Group 4b: boundary — global ratio exactly 0.25 does NOT fire ---
+  - interval: 1m
+    input_series:
+      - series: 'guvna_step_attempts_total{provider="solo", model="m", outcome="success"}'
+        values: 0+30x20
+      - series: 'guvna_step_attempts_total{provider="solo", model="m", outcome="server_error"}'
+        values: 0+10x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+
+  # --- Group 5: GuvnaStepDownSustained ---
+  # "kilo/m1" down the whole time -> fires after 10m.
+  # "mock/m2" down 6m then recovers -> the `for` window breaks, never fires.
+  # "dead/m3" never down -> silent.
+  - interval: 1m
+    input_series:
+      - series: 'guvna_step_down{provider="kilo", model="m1"}'
+        values: 1+0x20
+      - series: 'guvna_step_down{provider="mock", model="m2"}'
+        values: 1+0x5 0+0x15
+      - series: 'guvna_step_down{provider="dead", model="m3"}'
+        values: 0+0x20
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: GuvnaStepDownSustained
+        exp_alerts:
+          - exp_labels:
+              provider: kilo
+              model: m1
+              severity: warning
+            exp_annotations:
+              summary: "Step kilo/m1 down for 10m"
+              description: "The step has been in cool-off for 10 minutes. Check whether the model was removed or the provider changed its catalog."
+      - eval_time: 12m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+
+  # --- Group 6: GuvnaAuthQuarantine ---
+  # "kilo" auth counter jumps 0 -> 1 at t=61m: increase[1h] > 0 from
+  # t=61m, fires after `for: 5m` (~t=66m).
+  # "mock" rate_limit events only -> class filter excludes it.
+  # "old" auth counter constant at 1 (event predates the 1h window) ->
+  # increase is 0 -> silent. Proves the 1h window, not "ever".
+  - interval: 1m
+    input_series:
+      - series: 'guvna_quarantine_events_total{provider="kilo", class="auth"}'
+        values: 0+0x60 1+0x11
+      - series: 'guvna_quarantine_events_total{provider="mock", class="rate_limit"}'
+        values: 0+1x71
+      - series: 'guvna_quarantine_events_total{provider="old", class="auth"}'
+        values: 1+0x71
+    alert_rule_test:
+      - eval_time: 62m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 62m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 62m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 62m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 62m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: GuvnaUpstreamFailing
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: GuvnaAllKeysQuarantined
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: GuvnaErrorRateSpike
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: GuvnaStepDownSustained
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: GuvnaAuthQuarantine
+        exp_alerts:
+          - exp_labels:
+              provider: kilo
+              class: auth
+              severity: warning
+            exp_annotations:
+              summary: "Auth quarantine for kilo in the last hour"
+              description: "A key for kilo got a 401/403 and is quarantined for 24h. Rotate or replace the key."
