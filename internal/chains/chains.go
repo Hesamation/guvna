@@ -2,6 +2,7 @@ package chains
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -58,7 +59,7 @@ func (s *Store) Load(r *router.Router) error {
 			steps = append(steps, router.Step{Provider: st.Provider, Model: st.Model, Params: st.Params})
 		}
 		if err := r.AddChain(ch.Name, steps); err != nil {
-			fmt.Printf("chains: skipping %q from chains.yaml: %v\n", ch.Name, err)
+			log.Printf("chains: skipping %q from chains.yaml: %v", ch.Name, err)
 		}
 	}
 	return nil
