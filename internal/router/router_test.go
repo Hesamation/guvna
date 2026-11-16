@@ -197,3 +197,54 @@ func TestChainNamesSorted(t *testing.T) {
 		t.Errorf("got %v", names)
 	}
 }
+
+func TestPassthroughPrefersFirstProviderInConfigOrder(t *testing.T) {
+	cfg := &config.Config{
+		Providers: []config.Provider{
+			{Name: "first", Prefixes: []string{"shared"}},
+			{Name: "second", Prefixes: []string{"shared"}},
+		},
+	}
+	r := New(cfg)
+	for i := 0; i < 50; i++ {
+		_, steps, err := r.Resolve("shared/some-model")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if steps[0].Provider != "first" {
+			t.Fatalf("iteration %d: provider = %q, want %q (config order)", i, steps[0].Provider, "first")
+		}
+	}
+}
+
+func TestRemoveChainKeepsSharedModelResolving(t *testing.T) {
+	r := testRouter(t)
+	if err := r.AddChain("extra", []Step{{Provider: "groq", Model: "gemini-2.5-flash"}}); err != nil {
+		t.Fatal(err)
+	}
+	// "smart" (config chain) also serves gemini-2.5-flash; removing "extra"
+	// must not break resolution via "smart".
+	if err := r.RemoveChain("extra"); err != nil {
+		t.Fatal(err)
+	}
+	name, _, err := r.Resolve("gemini-2.5-flash")
+	if err != nil {
+		t.Fatalf("shared model must still resolve after chain removal: %v", err)
+	}
+	if name != "smart" {
+		t.Fatalf("got chain %q, want %q", name, "smart")
+	}
+}
+
+func TestRemoveChainDropsUnsharedModel(t *testing.T) {
+	r := testRouter(t)
+	if err := r.AddChain("solo", []Step{{Provider: "groq", Model: "only-here"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.RemoveChain("solo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.Resolve("only-here"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}

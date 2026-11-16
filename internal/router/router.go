@@ -23,6 +23,7 @@ type Router struct {
 	chains     map[string][]Step
 	modelIndex map[string]string
 	providers  map[string]config.Provider
+	order      []string          // provider names in config order (passthrough precedence)
 	sources    map[string]string // chain name -> "config" | "runtime"
 }
 
@@ -31,10 +32,12 @@ func New(cfg *config.Config) *Router {
 		chains:     make(map[string][]Step, len(cfg.Chains)),
 		modelIndex: make(map[string]string),
 		providers:  make(map[string]config.Provider, len(cfg.Providers)),
+		order:      make([]string, 0, len(cfg.Providers)),
 		sources:    make(map[string]string),
 	}
 	for _, p := range cfg.Providers {
 		r.providers[p.Name] = p
+		r.order = append(r.order, p.Name)
 	}
 	for _, ch := range cfg.Chains {
 		r.addLocked(ch.Name, stepsFromConfig(ch.Steps), "config")
@@ -100,11 +103,29 @@ func (r *Router) RemoveChain(name string) error {
 		return fmt.Errorf("chain %q is defined in config.yaml — edit the config, not the runtime store", name)
 	}
 	steps := r.chains[name]
-	for _, s := range steps {
-		delete(r.modelIndex, s.Model)
-	}
 	delete(r.chains, name)
 	delete(r.sources, name)
+	// Repair the model index: a removed step's model must keep resolving
+	// if another chain still serves it.
+	remaining := make([]string, 0, len(r.chains))
+	for n := range r.chains {
+		remaining = append(remaining, n)
+	}
+	sort.Strings(remaining)
+	for _, s := range steps {
+		delete(r.modelIndex, s.Model)
+		for _, n := range remaining {
+			for _, cs := range r.chains[n] {
+				if cs.Model == s.Model {
+					r.modelIndex[s.Model] = n
+					break
+				}
+			}
+			if _, ok := r.modelIndex[s.Model]; ok {
+				break
+			}
+		}
+	}
 	return nil
 }
 
@@ -138,7 +159,8 @@ func (r *Router) Resolve(model string) (name string, steps []Step, err error) {
 // full original name is sent (covers namespaced catalogs like orcarouter's
 // "openai/gpt-5.6-luna").
 func (r *Router) passthrough(model string) (string, string, bool) {
-	for _, p := range r.providers {
+	for _, name := range r.order {
+		p := r.providers[name]
 		prefixes := p.Prefixes
 		if len(prefixes) == 0 {
 			prefixes = []string{p.Name}
