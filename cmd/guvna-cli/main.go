@@ -37,6 +37,8 @@ func main() {
 		err = logsCmd(os.Args[2:])
 	case "chains":
 		err = chainsCmd(os.Args[2:])
+	case "providers":
+		err = providersCmd(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -59,6 +61,8 @@ usage:
   guvna-cli chains [list]
   guvna-cli chains add NAME --step provider:model [--step ...]
   guvna-cli chains rm NAME
+  guvna-cli providers [list]
+  guvna-cli providers test [--provider NAME] [--model NAME]
 
 flags:
   --url    gateway base URL (default: %s or $GUVNA_URL)
@@ -129,10 +133,11 @@ func (cf commonFlags) do(method, path string, body any, out any) error {
 }
 
 type statusResp struct {
-	Uptime    string   `json:"uptime"`
-	Chains    []string `json:"chains"`
-	Steps     []step   `json:"steps"`
-	StepsDown int      `json:"steps_down"`
+	Uptime    string      `json:"uptime"`
+	Chains    []string    `json:"chains"`
+	Steps     []step      `json:"steps"`
+	StepsDown int         `json:"steps_down"`
+	Keys      []keyStatus `json:"keys"`
 	Usage     struct {
 		Requests   int            `json:"requests"`
 		Streams    int            `json:"streams"`
@@ -141,6 +146,19 @@ type statusResp struct {
 		TokensOut  int64          `json:"tokens_out"`
 		ByProvider []providerStat `json:"by_provider"`
 	} `json:"usage"`
+}
+
+type keyStatus struct {
+	Provider  string `json:"provider"`
+	Index     int    `json:"index"`
+	Env       string `json:"env"`
+	State     string `json:"state"`
+	Reason    string `json:"reason"`
+	Failures  int    `json:"failures"`
+	DownFor   int64  `json:"down_for_ns"`
+	Requests  int64  `json:"requests"`
+	TokensIn  int64  `json:"tokens_in"`
+	TokensOut int64  `json:"tokens_out"`
 }
 
 type step struct {
@@ -186,6 +204,23 @@ func statusCmd(args []string) error {
 	}
 	if st.StepsDown > 0 {
 		fmt.Printf("\n%d step(s) down — skipped in chains until cool-off expires\n", st.StepsDown)
+	}
+
+	if len(st.Keys) > 0 {
+		fmt.Printf("\nKEYS\n")
+		fmt.Printf("  %-12s %-22s %-18s %-11s %8s  %10s\n", "PROVIDER", "KEY", "STATE", "REASON", "FAILURES", "TOKENS IN/OUT")
+		for _, k := range st.Keys {
+			state := k.State
+			if k.State == "quarantined" && k.DownFor > 0 {
+				state = fmt.Sprintf("quarantined %v", time.Duration(k.DownFor).Round(time.Second))
+			}
+			reason := k.Reason
+			if reason == "" {
+				reason = "-"
+			}
+			fmt.Printf("  %-12s %-22s %-18s %-11s %8d  %6d/%-6d\n",
+				k.Provider, k.Env, state, reason, k.Failures, k.TokensIn, k.TokensOut)
+		}
 	}
 
 	fmt.Printf("\nUSAGE (persisted)\n")
@@ -356,5 +391,121 @@ func chainsRmCmd(args []string) error {
 		return err
 	}
 	fmt.Printf("removed chain %q\n", name)
+	return nil
+}
+
+func providersCmd(args []string) error {
+	if len(args) == 0 || args[0] == "list" {
+		return providersListCmd(args)
+	}
+	switch args[0] {
+	case "test":
+		return providersTestCmd(args[1:])
+	default:
+		return fmt.Errorf("unknown providers subcommand %q (want list|test)", args[0])
+	}
+}
+
+// providersListCmd renders per-provider pool summaries from /admin/status:
+// provider, key count, and how many keys are healthy vs quarantined.
+func providersListCmd(args []string) error {
+	fs := flag.NewFlagSet("providers list", flag.ExitOnError)
+	var cf commonFlags
+	parseCommon(fs, &cf)
+	fs.Parse(args)
+
+	var st statusResp
+	if err := cf.get("/admin/status", &st); err != nil {
+		return err
+	}
+	if cf.json {
+		return printJSON(st.Keys)
+	}
+	fmt.Printf("%-14s %6s %9s %13s\n", "PROVIDER", "KEYS", "HEALTHY", "QUARANTINED")
+	type row struct{ total, healthy, quarantined int }
+	order := []string{}
+	byProvider := map[string]*row{}
+	for _, k := range st.Keys {
+		r, ok := byProvider[k.Provider]
+		if !ok {
+			r = &row{}
+			byProvider[k.Provider] = r
+			order = append(order, k.Provider)
+		}
+		r.total++
+		if k.State == "quarantined" {
+			r.quarantined++
+		} else {
+			r.healthy++
+		}
+	}
+	for _, name := range order {
+		r := byProvider[name]
+		fmt.Printf("%-14s %6d %9d %13d\n", name, r.total, r.healthy, r.quarantined)
+	}
+	if len(order) == 0 {
+		fmt.Println("(no providers — check config.yaml)")
+	}
+	return nil
+}
+
+type providerProbe struct {
+	Name  string `json:"name"`
+	Model string `json:"model"`
+	Note  string `json:"note"`
+	Keys  []struct {
+		Env       string `json:"env"`
+		Verdict   string `json:"verdict"`
+		Status    int    `json:"status"`
+		LatencyMS int64  `json:"latency_ms"`
+		Detail    string `json:"detail"`
+	} `json:"keys"`
+}
+
+// providersTestCmd probes every configured provider's keys (or one provider /
+// one model) through POST /admin/providers/test and renders verdicts.
+func providersTestCmd(args []string) error {
+	fs := flag.NewFlagSet("providers test", flag.ExitOnError)
+	var cf commonFlags
+	parseCommon(fs, &cf)
+	provider := fs.String("provider", "", "probe only this provider")
+	model := fs.String("model", "", "probe with this model instead of the provider's first configured one")
+	fs.Parse(args)
+
+	body := map[string]string{}
+	if *provider != "" {
+		body["provider"] = *provider
+	}
+	if *model != "" {
+		body["model"] = *model
+	}
+	var out struct {
+		Providers []providerProbe `json:"providers"`
+	}
+	if err := cf.do(http.MethodPost, "/admin/providers/test", body, &out); err != nil {
+		return err
+	}
+	if cf.json {
+		return printJSON(out)
+	}
+	fmt.Printf("%-14s %-28s %-20s %-13s %6s  %8s  %s\n",
+		"PROVIDER", "MODEL", "KEY", "VERDICT", "STATUS", "LATENCY", "DETAIL")
+	for _, p := range out.Providers {
+		if p.Note != "" {
+			fmt.Printf("%-14s %-28s %-20s %-13s %6s  %8s  %s\n", p.Name, "-", "-", "skipped", "-", "-", p.Note)
+			continue
+		}
+		for _, k := range p.Keys {
+			status := "-"
+			if k.Status != 0 {
+				status = fmt.Sprintf("%d", k.Status)
+			}
+			fmt.Printf("%-14s %-28s %-20s %-13s %6s  %8s  %s\n",
+				p.Name, p.Model, k.Env, k.Verdict, status,
+				fmt.Sprintf("%dms", k.LatencyMS), k.Detail)
+		}
+	}
+	fmt.Printf("\nverdicts: ok / dead (401/403) / limited (429) / upstream (5xx) / unreachable (network) / rejected (other 4xx) / unset (env not set)\n")
+	fmt.Printf("probes are read-only diagnostics: they do not touch key quarantine, step health, or telemetry.\n")
 	return nil
 }
