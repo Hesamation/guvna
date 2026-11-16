@@ -381,8 +381,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			if p := s.pools[step.Provider]; p != nil {
 				p.MarkSuccess(keyEnv)
 			}
-			s.relaySuccess(w, r, step, chain, req, resp, keyEnv)
-			s.observeChat(chainLabel, metrics.OutcomeSuccess, start)
+			// The upstream answered 2xx, but the relay itself can still
+			// fail (truncated stream, mid-stream error) — the chat
+			// outcome must reflect what the client actually got.
+			failed := s.relaySuccess(w, r, step, chain, req, resp, keyEnv)
+			outcome := metrics.OutcomeSuccess
+			if failed {
+				outcome = metrics.OutcomeFailed
+			}
+			s.observeChat(chainLabel, outcome, start)
 			s.observeFallback(chainLabel, fellBack)
 			return
 		}
@@ -623,7 +630,12 @@ func (s *Server) poolNames() []string {
 	return names
 }
 
-func (s *Server) relaySuccess(w http.ResponseWriter, r *http.Request, step router.Step, chain string, req chatRequest, resp *http.Response, keyEnv string) {
+// relaySuccess relays a 2xx upstream response to the client. It reports
+// whether the relay failed to deliver a complete response: a truncated
+// stream or a mid-stream failure counts as failed even though the
+// upstream answered 2xx, so the chat-level outcome metric stays honest.
+// A client disconnect is not a relay failure.
+func (s *Server) relaySuccess(w http.ResponseWriter, r *http.Request, step router.Step, chain string, req chatRequest, resp *http.Response, keyEnv string) bool {
 	defer resp.Body.Close()
 	if !req.Stream {
 		// Non-streaming: relay body, best-effort token count.
@@ -631,13 +643,13 @@ func (s *Server) relaySuccess(w http.ResponseWriter, r *http.Request, step route
 		if err != nil {
 			if r.Context().Err() != nil {
 				// Client disconnected — not an upstream failure.
-				return
+				return false
 			}
 			s.hlth.Mark(step.Provider, step.Model, 0, err)
 			s.poolRecord(keyEnv, step, chain, req, 502, 0, 0, keypool.ClassTransient)
 			s.record(step, chain, req, 502, err, keyEnv)
 			http.Error(w, `{"error":{"message":"upstream read failed"}}`, http.StatusBadGateway)
-			return
+			return true
 		}
 		in, out := telemetry.ParseUsage(body)
 		s.poolRecord(keyEnv, step, chain, req, resp.StatusCode, in, out, "")
@@ -645,16 +657,16 @@ func (s *Server) relaySuccess(w http.ResponseWriter, r *http.Request, step route
 		w.Header().Set("X-Guvna-Step", step.Provider+"/"+step.Model)
 		w.WriteHeader(resp.StatusCode)
 		w.Write(body)
-		return
+		return false
 	}
-	s.relayStream(w, r, step, chain, req, resp, keyEnv)
+	return s.relayStream(w, r, step, chain, req, resp, keyEnv)
 }
 
-func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router.Step, chain string, req chatRequest, resp *http.Response, keyEnv string) {
+func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router.Step, chain string, req chatRequest, resp *http.Response, keyEnv string) bool {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, `{"error":{"message":"streaming unsupported"}}`, http.StatusInternalServerError)
-		return
+		return true
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -715,7 +727,7 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router
 	for {
 		select {
 		case <-r.Context().Done():
-			return
+			return false
 		default:
 		}
 		line, err := br.ReadBytes('\n')
@@ -727,7 +739,7 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router
 			}
 			mu.Unlock()
 			if werr != nil {
-				return
+				return false
 			}
 			select {
 			case activity <- struct{}{}:
@@ -747,7 +759,7 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router
 		}
 		if err != nil {
 			if r.Context().Err() != nil {
-				return // client disconnected mid-stream
+				return false // client disconnected mid-stream
 			}
 			if errors.Is(err, io.EOF) {
 				if sawData && !sawDone {
@@ -763,14 +775,14 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router
 					mu.Unlock()
 					s.hlth.Mark(step.Provider, step.Model, 0, errors.New("stream truncated (no [DONE])"))
 					s.poolRecord(keyEnv, step, chain, req, 502, in, out, keypool.ClassTransient)
-					return
+					return true
 				}
 				s.hlth.MarkSuccess(step.Provider, step.Model)
 				if p := s.pools[step.Provider]; p != nil {
 					p.MarkSuccess(keyEnv)
 				}
 				s.poolRecord(keyEnv, step, chain, req, resp.StatusCode, in, out, "")
-				return
+				return false
 			}
 			// Mid-stream failure: propagate as an error chunk, then close.
 			// Mark the provider so later requests skip it during cool-off.
@@ -781,7 +793,7 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, step router
 			mu.Unlock()
 			s.hlth.Mark(step.Provider, step.Model, 0, err)
 			s.poolRecord(keyEnv, step, chain, req, 502, in, out, keypool.ClassTransient)
-			return
+			return true
 		}
 	}
 }
